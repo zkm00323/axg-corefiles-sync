@@ -205,7 +205,7 @@ def scan_setup_folders():
             print(f"✔[Setup]{folder_name}符合結構")
             valid_folders.append({
                 'folder_name': folder_name,
-                'folder_path': str(folder),
+                'folder_path': str(folder.absolute()),
                 'remotePath': config['remotePath'],
                 'getNeedURL': config['getNeedURL'],
                 'vmpFiles': config['vmpFiles'],
@@ -276,6 +276,7 @@ def process(data):
         synchronize remote -delete \"{output_path}\" {remotePath}
         exit
         """
+        print("執行 WinSCP 同步指令：", script)
         # 寫入暫存檔
         with tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt') as f:
             script_path = f.name
@@ -322,6 +323,7 @@ def process(data):
         sync_remote(remotePath, output_path)
         print("✅[GenFlie]生成檔案完成")
 
+    sync_remote(remotePath, output_path)
     while not process_stop:
         remote_need = int(requests.get(needURL).text);
         local_count = files_count(output_path)
