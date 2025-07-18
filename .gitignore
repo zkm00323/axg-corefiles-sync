@@ -1,3 +1,4 @@
 ﻿Setup/*/Output
 Setup/*/gen
 build/__pycache__
+build/env.json

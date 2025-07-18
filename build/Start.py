@@ -273,7 +273,7 @@ def process(data):
 
         # 每個指令一行，避免卡住
         script = f"""open {host}
-        synchronize remote -delete \"{output_path}\" {remotePath}
+        synchronize remote -delete {output_path} {remotePath}
         exit
         """
         print("執行 WinSCP 同步指令：", script)
@@ -283,7 +283,7 @@ def process(data):
             f.write(script)
         
         # 執行 WinSCP（用 os.system）
-        cmd = f'{winscp_path} /script="{script_path}"'
+        cmd = f'{winscp_path} /script={script_path}'
         print("執行 WinSCP 同步指令：", cmd)
         os.system(cmd)
         os.remove(script_path)
