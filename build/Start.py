@@ -16,6 +16,42 @@ import subprocess
 import tempfile
 import git
 
+process_stop = False
+threads_count = 0
+
+def restart_application():
+    """重新啟動應用程式"""
+    try:
+        print("🔄[Restart] 正在重新啟動應用程式...")
+        
+        for thread in threads:
+            thread.stop()
+
+        # 取得當前 Python 執行檔路徑
+        python_executable = sys.executable
+        script_path = os.path.abspath(__file__)
+        
+        # 在 Windows 上使用 subprocess.Popen 重新啟動
+        if os.name == 'nt':  # Windows
+            # 使用 subprocess 重新啟動
+            subprocess.Popen([python_executable, script_path], 
+                           cwd=os.path.dirname(script_path))
+        else:  # Linux/Unix
+            # 在 Linux 上使用 os.execv 重新啟動
+            os.execv(python_executable, [python_executable, script_path])
+        
+        # 退出當前程序
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"❌[Restart] 重新啟動失敗: {e}")
+
+def stop_thread(path):
+    print(f"🛑[Sync] {path} 線程已停止 (剩餘: {threads_count})")
+    threads_count -= 1
+    if(threads_count == 0):
+        restart_application()
+
 def is_valid_path(path_str):
     """檢查是否為合法路徑"""
     if not path_str or not isinstance(path_str, str):
@@ -186,6 +222,9 @@ def scan_setup_folders():
 # remotePath是遠端路徑
 # needURL是獲取需要上傳的檔案的URL
 def process(data):
+    global threads_count
+    threads_count += 1
+
     path = data['folder_path']
     remotePath = data['remotePath']
     needURL = data['getNeedURL']
@@ -289,7 +328,7 @@ def process(data):
         remove_oldest_file(output_path)
     sync_remote(remotePath, output_path)
 
-    while True:
+    while not process_stop:
         remote_need = int(requests.get(needURL).text);
         local_count = files_count(output_path)
         print("💤[Sync]本地檔案/目標數量：", local_count,"/",fileAmount)
@@ -299,13 +338,23 @@ def process(data):
         needGen = max(fileAmount-local_count,remote_need)
         if(needGen>0):
             print("▶️[Sync]開始生成檔案")
-            for i in range(needGen):
+            while(needGen>0):
+                if(process_stop):
+                    break
                 gen_file()
+                needGen -= 1
         else:
             print("💤[Sync]沒有需要上傳的檔案")
 
         print("💤[Sync]等待60秒")
-        time.sleep(60)
+        count = 0
+        while(count < 60):
+            time.sleep(1)
+            count += 1
+            if(process_stop):
+                break
+    
+    stop_thread(path)
 
 def start_Threads(valid_folders):
     """啟動多線程處理"""
@@ -314,11 +363,8 @@ def start_Threads(valid_folders):
         return
     
     print(f"✅[Start] 找到 {len(valid_folders)} 個有效設定，開始處理...")
-    threads = []
     for folder_info in valid_folders:
-        thread = threading.Thread(target=process, args=(folder_info,))
-        threads.append(thread)
-        thread.start()
+        threading.Thread(target=process, args=(folder_info,)).start()
 
 def check_git_updates():
     """檢查 Git 遠端是否有更新"""
@@ -371,46 +417,17 @@ def check_git_updates():
         print(f"❌[Git] 檢查更新時發生錯誤: {e}")
         return False
 
-def restart_application():
-    """重新啟動應用程式"""
-    try:
-        print("🔄[Restart] 正在重新啟動應用程式...")
-        
-        # 取得當前 Python 執行檔路徑
-        python_executable = sys.executable
-        script_path = os.path.abspath(__file__)
-        
-        # 在 Windows 上使用 subprocess.Popen 重新啟動
-        if os.name == 'nt':  # Windows
-            # 使用 subprocess 重新啟動
-            subprocess.Popen([python_executable, script_path], 
-                           cwd=os.path.dirname(script_path))
-        else:  # Linux/Unix
-            # 在 Linux 上使用 os.execv 重新啟動
-            os.execv(python_executable, [python_executable, script_path])
-        
-        # 退出當前程序
-        sys.exit(0)
-        
-    except Exception as e:
-        print(f"❌[Restart] 重新啟動失敗: {e}")
-
 def git_update_monitor():
     """Git 更新監控線程，每10秒檢查一次"""
     print("🔄[GitMonitor] Git 更新監控線程已啟動")
     
-    while True:
+    while not process_stop:
         try:
             if check_git_updates():
-                print("🔄[GitMonitor] 檢測到更新，準備重新啟動...")
-                # 等待一下讓其他線程有時間完成當前任務
-                time.sleep(2)
-                restart_application()
+                process_stop = True
                 break
             
-            # 等待10秒後再次檢查
-            time.sleep(10)
-            
+            time.sleep(60)
         except Exception as e:
             print(f"❌[GitMonitor] 監控線程發生錯誤: {e}")
             # 發生錯誤時等待30秒再重試
