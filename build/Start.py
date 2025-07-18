@@ -14,6 +14,7 @@ import random
 import string
 import subprocess
 import tempfile
+import git
 
 def is_valid_path(path_str):
     """檢查是否為合法路徑"""
@@ -308,11 +309,93 @@ def process(data):
 
 def start_Threads(valid_folders):
     """啟動多線程處理"""
+    if not valid_folders:
+        print("⚠️[Start] 沒有找到有效的設定資料夾")
+        return
+    
+    print(f"✅[Start] 找到 {len(valid_folders)} 個有效設定，開始處理...")
     threads = []
     for folder_info in valid_folders:
         thread = threading.Thread(target=process, args=(folder_info,))
         threads.append(thread)
         thread.start()
+
+def check_git_updates():
+    """檢查 Git 遠端是否有更新"""
+    try:
+        # 取得專案根目錄（當前目錄的父目錄）
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        
+        # 初始化 Git 倉庫
+        repo = git.Repo(project_root)
+        
+        # 檢查是否有遠端倉庫
+        if not repo.remotes:
+            print("⚠️[Git] 沒有遠端倉庫設定")
+            return False
+        
+        # 取得遠端更新
+        origin = repo.remotes.origin
+        origin.fetch()
+        
+        # 比較本地和遠端
+        local_commit = repo.head.commit
+        remote_commit = origin.refs.master.commit if hasattr(origin.refs, 'master') else origin.refs.main.commit
+        
+        if local_commit.hexsha != remote_commit.hexsha:
+            print(f"🔄[Git] 發現遠端更新，正在拉取...")
+            print(f"   本地: {local_commit.hexsha[:8]}")
+            print(f"   遠端: {remote_commit.hexsha[:8]}")
+            
+            # 拉取更新
+            origin.pull()
+            print("✅[Git] 更新完成")
+            return True
+        else:
+            return False
+            
+    except Exception as e:
+        print(f"❌[Git] 檢查更新時發生錯誤: {e}")
+        return False
+
+def restart_application():
+    """重新啟動應用程式"""
+    try:
+        print("🔄[Restart] 正在重新啟動應用程式...")
+        
+        # 取得當前 Python 執行檔路徑
+        python_executable = sys.executable
+        script_path = os.path.abspath(__file__)
+        
+        # 在 Windows 上使用 subprocess.Popen 重新啟動
+        if os.name == 'nt':  # Windows
+            # 使用 subprocess 重新啟動
+            subprocess.Popen([python_executable, script_path], 
+                           cwd=os.path.dirname(script_path))
+        else:  # Linux/Unix
+            # 在 Linux 上使用 os.execv 重新啟動
+            os.execv(python_executable, [python_executable, script_path])
+        
+        # 退出當前程序
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"❌[Restart] 重新啟動失敗: {e}")
+
+def git_update_monitor():
+    """Git 更新監控線程，每10秒檢查一次"""
+    print("🔄[GitMonitor] Git 更新監控線程已啟動")
+    
+    while True:
+        try:
+            if check_git_updates():
+                print("🔄[GitMonitor] 檢測到更新，準備重新啟動...")
+                restart_application()
+            time.sleep(10)
+        except Exception as e:
+            print(f"❌[GitMonitor] 監控線程發生錯誤: {e}")
+            time.sleep(30)
 
 def get_env():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -321,8 +404,10 @@ def get_env():
         return json.load(f)
 
 def main():
-    valid_folders = scan_setup_folders()
-    start_Threads(valid_folders)
+    print("🚀[Start] AXG Core Files Sync Tool 啟動中...")
+    
+    #start_Threads(scan_setup_folders())
+    threading.Thread(target=git_update_monitor).start()
 
     return 0
 
