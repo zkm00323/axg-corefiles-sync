@@ -1,0 +1,9 @@
+{
+    "vmpFiles": [
+        "*.exe",
+        "aig.dll"
+    ],
+    "remotePath": "/root/Output/aig3/",
+    "getNeedURL": "https://ashrta.osananajimi.moe/beta2/aig3/needupload",
+    "fileAmount": 20
+}
