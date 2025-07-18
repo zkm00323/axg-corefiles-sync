@@ -1,0 +1,9 @@
+{
+    "vmpFiles": [
+        "*.exe",
+        "apg.dll"
+    ],
+    "remotePath": "/root/Output/apg3/",
+    "getNeedURL": "https://ashrta.osananajimi.moe/beta2/apg3/needupload",
+    "fileAmount": 40
+}
