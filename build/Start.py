@@ -348,11 +348,23 @@ def check_git_updates():
             print(f"   本地: {local_commit.hexsha[:8]}")
             print(f"   遠端: {remote_commit.hexsha[:8]}")
             
-            # 拉取更新
-            origin.pull()
-            print("✅[Git] 更新完成")
-            return True
+            try:
+                # 嘗試正常拉取
+                origin.pull()
+                print("✅[Git] 更新完成")
+                return True
+            except git.exc.GitCommandError as e:
+                print(f"⚠️[Git] 正常拉取失敗，嘗試強制重置: {e}")
+                try:
+                    # 強制重置到遠端版本
+                    repo.git.reset('--hard', 'origin/master' if hasattr(origin.refs, 'master') else 'origin/main')
+                    print("✅[Git] 強制更新完成")
+                    return True
+                except Exception as reset_error:
+                    print(f"❌[Git] 強制更新也失敗: {reset_error}")
+                    return False
         else:
+            print("💤[Git] 已是最新版本")
             return False
             
     except Exception as e:
@@ -391,10 +403,17 @@ def git_update_monitor():
         try:
             if check_git_updates():
                 print("🔄[GitMonitor] 檢測到更新，準備重新啟動...")
+                # 等待一下讓其他線程有時間完成當前任務
+                time.sleep(2)
                 restart_application()
+                break
+            
+            # 等待10秒後再次檢查
             time.sleep(10)
+            
         except Exception as e:
             print(f"❌[GitMonitor] 監控線程發生錯誤: {e}")
+            # 發生錯誤時等待30秒再重試
             time.sleep(30)
 
 def get_env():
