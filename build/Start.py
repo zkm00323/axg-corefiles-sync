@@ -24,9 +24,6 @@ def restart_application():
     try:
         print("🔄[Restart] 正在重新啟動應用程式...")
         
-        for thread in threads:
-            thread.stop()
-
         # 取得當前 Python 執行檔路徑
         python_executable = sys.executable
         script_path = os.path.abspath(__file__)
@@ -47,6 +44,7 @@ def restart_application():
         print(f"❌[Restart] 重新啟動失敗: {e}")
 
 def stop_thread(path):
+    global threads_count
     print(f"🛑[Sync] {path} 線程已停止 (剩餘: {threads_count})")
     threads_count -= 1
     if(threads_count == 0):
@@ -324,10 +322,6 @@ def process(data):
         sync_remote(remotePath, output_path)
         print("✅[GenFlie]生成檔案完成")
 
-    while(files_count(output_path)>0):
-        remove_oldest_file(output_path)
-    sync_remote(remotePath, output_path)
-
     while not process_stop:
         remote_need = int(requests.get(needURL).text);
         local_count = files_count(output_path)
@@ -354,6 +348,9 @@ def process(data):
             if(process_stop):
                 break
     
+    while(files_count(output_path)>0):
+        remove_oldest_file(output_path)
+    sync_remote(remotePath, output_path)
     stop_thread(path)
 
 def start_Threads(valid_folders):
@@ -419,6 +416,7 @@ def check_git_updates():
 
 def git_update_monitor():
     """Git 更新監控線程，每10秒檢查一次"""
+    global process_stop
     print("🔄[GitMonitor] Git 更新監控線程已啟動")
     
     while not process_stop:
