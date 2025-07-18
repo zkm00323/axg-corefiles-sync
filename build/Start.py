@@ -406,7 +406,7 @@ def get_env():
 def main():
     print("🚀[Start] AXG Core Files Sync Tool 啟動中...")
     
-    #start_Threads(scan_setup_folders())
+    start_Threads(scan_setup_folders())
     threading.Thread(target=git_update_monitor).start()
 
     return 0
