@@ -223,6 +223,7 @@ def process(data):
     global threads_count
     threads_count += 1
 
+    name = data['folder_name']
     path = data['folder_path']
     remotePath = data['remotePath']
     needURL = data['getNeedURL']
@@ -317,7 +318,7 @@ def process(data):
         need_vmp_file_list = get_vmp_file_list(gen_path, vmpFiles)
         for file in need_vmp_file_list:
             vmp_file(file)
-        zip_folder(gen_path, output_path+"\\APG_Run["+random_name(8)+"].zip")
+        zip_folder(gen_path, output_path+"\\"+name+"_Run["+random_name(8)+"].zip")
         if(files_count(output_path) > fileAmount):
             remove_oldest_file(output_path)
         sync_remote(remotePath, output_path)
