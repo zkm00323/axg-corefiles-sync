@@ -260,12 +260,19 @@ def process(data):
         target_dir = os.path.dirname(target_path)
         if target_dir and not os.path.exists(target_dir):
             os.makedirs(target_dir)
+        
+        # 獲取資料夾名稱作為 ZIP 內的主資料夾
+        folder_name = os.path.basename(path)
+        
         with zipfile.ZipFile(target_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(path):
                 for file in files:
                     abs_file = os.path.join(root, file)
+                    # 計算相對於 path 的路徑
                     rel_path = os.path.relpath(abs_file, path)
-                    zipf.write(abs_file, rel_path)
+                    # 將文件放在主資料夾內
+                    zip_path = os.path.join(folder_name, rel_path)
+                    zipf.write(abs_file, zip_path)
 
     def sync_remote(remotePath, output_path):
         env = get_env()
