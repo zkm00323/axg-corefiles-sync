@@ -15,9 +15,38 @@ import string
 import subprocess
 import tempfile
 import git
+import signal
 
 process_stop = False
 threads_count = 0
+
+def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5):
+    """執行命令並處理超時和重試"""
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄[Execute] 嘗試執行命令 (第 {attempt + 1} 次)")
+            result = subprocess.run(cmd, shell=True, timeout=timeout_seconds, 
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print("✅[Execute] 命令執行成功")
+                return True
+            else:
+                print(f"⚠️[Execute] 命令執行失敗 (返回碼: {result.returncode})")
+                if result.stderr:
+                    print(f"錯誤訊息: {result.stderr}")
+                    
+        except subprocess.TimeoutExpired:
+            print(f"⏰[Execute] 命令執行超時 ({timeout_seconds} 秒)")
+        except Exception as e:
+            print(f"❌[Execute] 命令執行異常: {e}")
+        
+        if attempt < max_retries - 1:
+            print(f"⏳[Execute] 等待 {retry_delay} 秒後重試...")
+            time.sleep(retry_delay)
+    
+    print("❌[Execute] 所有重試都失敗")
+    return False
 
 def restart_application():
     """重新啟動應用程式"""
@@ -274,6 +303,8 @@ def process(data):
                     zip_path = os.path.join(folder_name, rel_path)
                     zipf.write(abs_file, zip_path)
 
+    
+
     def sync_remote(remotePath, output_path):
         env = get_env()
         host = env["host"]
@@ -285,17 +316,26 @@ def process(data):
         exit
         """
         print("執行 WinSCP 同步指令：", script)
+        
         # 寫入暫存檔
         with tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt') as f:
             script_path = f.name
             f.write(script)
         
-        # 執行 WinSCP（用 os.system）
+        # 執行 WinSCP 帶超時檢測
         cmd = f'{winscp_path} /script={script_path}'
-        print("執行 WinSCP 同步指令：", cmd)
-        os.system(cmd)
-        os.remove(script_path)
-        print("✅[Sync]同步完成")
+        success = execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
+        
+        # 清理暫存檔
+        try:
+            os.remove(script_path)
+        except:
+            pass
+        
+        if success:
+            print("✅[Sync]同步完成")
+        else:
+            print("❌[Sync]同步失敗")
 
     def files_count(folder):
         if not os.path.exists(folder):
