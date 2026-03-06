@@ -464,20 +464,28 @@ def process(data):
 
             existing_files = list_existing_index_files()
             existing_indexes = set(existing_files.keys())
+            stale_changed = False
 
             for stale_index in sorted(existing_indexes - target_indexes):
                 stale_path = existing_files[stale_index]
                 print(f"[Sync] remove stale: {stale_path}")
                 os.remove(stale_path)
                 changed = True
+                stale_changed = True
 
+            generated_any = False
             for missing_index in sorted(target_indexes - existing_indexes):
                 if process_stop:
                     break
                 gen_file(missing_index)
                 changed = True
+                generated_any = True
+                if not process_stop:
+                    sync_remote(remotePath, output_path)
+                    has_synced_once = True
 
-            should_sync = (changed or not has_synced_once) and not process_stop
+            # If only stale files were removed, or first run has not synced yet, sync once.
+            should_sync = ((stale_changed and not generated_any) or not has_synced_once) and not process_stop
             if should_sync:
                 sync_remote(remotePath, output_path)
                 has_synced_once = True
