@@ -16,25 +16,55 @@ import subprocess
 import tempfile
 import git
 import signal
+import shlex
 
 process_stop = False
 threads_count = 0
 
 def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5):
     """執行命令並處理超時和重試"""
+    def decode_output(raw):
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        for enc in ("utf-8", "utf-16le", "gbk"):
+            try:
+                return raw.decode(enc)
+            except Exception:
+                pass
+        return raw.decode("utf-8", errors="replace")
+
     for attempt in range(max_retries):
         try:
             print(f"🔄[Execute] 嘗試執行命令 (第 {attempt + 1} 次)")
-            result = subprocess.run(cmd, shell=True, timeout=timeout_seconds, 
-                                  capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                shell=isinstance(cmd, str),
+                timeout=timeout_seconds,
+                capture_output=True,
+                text=False,
+            )
+            stdout = decode_output(result.stdout)
+            stderr = decode_output(result.stderr)
             
             if result.returncode == 0:
                 print("✅[Execute] 命令執行成功")
                 return True
             else:
                 print(f"⚠️[Execute] 命令執行失敗 (返回碼: {result.returncode})")
-                if result.stderr:
-                    print(f"錯誤訊息: {result.stderr}")
+                if stderr:
+                    print(f"錯誤訊息: {stderr}")
+                elif stdout:
+                    print(f"輸出訊息: {stdout}")
+
+                if result.returncode in (-1, 4294967295) and (
+                    "wsl.exe --install" in stdout
+                    or "Windows Subsystem for Linux has no installed distributions" in stdout
+                    or "适用于 Linux 的 Windows 子系统没有已安装的分发" in stdout
+                ):
+                    print("⚠️[Execute] WSL 尚未安裝發行版，請先安裝 Ubuntu 後再重試。")
+                    return False
                     
         except subprocess.TimeoutExpired:
             print(f"⏰[Execute] 命令執行超時 ({timeout_seconds} 秒)")
@@ -262,6 +292,15 @@ def process(data):
     gen_path = os.path.join(path, "gen")
     output_path = os.path.join(path, "Output")
 
+    def windows_to_wsl_path(path_str):
+        if re.match(r"^[a-zA-Z]:[\\/]", path_str):
+            drive = path_str[0].lower()
+            rest = path_str[2:].replace("\\", "/")
+            if not rest.startswith("/"):
+                rest = "/" + rest
+            return f"/mnt/{drive}{rest}"
+        return path_str.replace("\\", "/")
+
     def vmp_file(file):
         print("⏳[GenFlie]加密檔案"+file)
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -308,29 +347,36 @@ def process(data):
     def sync_remote(remotePath, output_path):
         env = get_env()
         host = env["host"]
-        winscp_path = env["winscp_path"]
+        ssh_key_path = env.get("ssh_key_path", "").strip()
+        rsync_use_wsl = env.get("rsync_use_wsl", True)
+        rsync_bin = env.get("rsync_bin", "rsync").strip() or "rsync"
 
-        # 每個指令一行，避免卡住
-        script = f"""open {host}
-        synchronize remote -delete {output_path} {remotePath}
-        exit
-        """
-        print("執行 WinSCP 同步指令：", script)
-        
-        # 寫入暫存檔
-        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt') as f:
-            script_path = f.name
-            f.write(script)
-        
-        # 執行 WinSCP 帶超時檢測
-        cmd = f'{winscp_path} /script={script_path}'
+        local_path = output_path
+        key_path = ssh_key_path
+        if rsync_use_wsl:
+            local_path = windows_to_wsl_path(local_path)
+            if key_path:
+                key_path = windows_to_wsl_path(key_path)
+        local_path = local_path.rstrip("/\\") + "/"
+
+        ssh_cmd = "ssh -o StrictHostKeyChecking=accept-new"
+        if key_path:
+            ssh_cmd += f" -i {shlex.quote(key_path)}"
+
+        remote_target = f"{host}:{remotePath}"
+        rsync_cmd = (
+            f"{rsync_bin} -az --delete --mkpath "
+            f"-e {shlex.quote(ssh_cmd)} "
+            f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+        )
+
+        if rsync_use_wsl:
+            cmd = ["wsl", "-e", "bash", "-lc", rsync_cmd]
+        else:
+            cmd = rsync_cmd
+
+        print("[Sync] Run rsync:", rsync_cmd)
         success = execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
-        
-        # 清理暫存檔
-        try:
-            os.remove(script_path)
-        except:
-            pass
         
         if success:
             print("✅[Sync]同步完成")
@@ -356,48 +402,98 @@ def process(data):
         print("⏳[GenFlie]刪除最舊的檔案", oldest)
         os.remove(oldest)
 
-    def random_name(count):
-        return "".join(random.choices(string.ascii_letters + string.digits, k=count))
+    def resolve_code():
+        try:
+            parsed = urlparse(needURL)
+            parts = [p for p in parsed.path.split("/") if p]
+            # expected: /download/:code/output/index
+            for i in range(len(parts) - 3):
+                if parts[i] == "download" and parts[i + 2] == "output" and parts[i + 3] == "index":
+                    return parts[i + 1].lower()
+        except Exception:
+            pass
+        return name.lower()
 
-    def gen_file():
-        print("▶️[GenFlie]開始生成檔案")
+    code = resolve_code()
+    file_pattern = re.compile(rf"^{re.escape(code)}_(\d+)\.zip$")
+
+    def get_current_index():
+        resp = requests.get(needURL, timeout=15)
+        resp.raise_for_status()
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict) and "index" in payload:
+                return int(payload["index"])
+        except Exception:
+            pass
+        return int(resp.text.strip())
+
+    def output_file_path(index_value):
+        return os.path.join(output_path, f"{code}_{index_value}.zip")
+
+    def list_existing_index_files():
+        mapping = {}
+        if not os.path.isdir(output_path):
+            return mapping
+        for fname in os.listdir(output_path):
+            fpath = os.path.join(output_path, fname)
+            if not os.path.isfile(fpath):
+                continue
+            match = file_pattern.match(fname)
+            if match:
+                mapping[int(match.group(1))] = fpath
+        return mapping
+
+    def gen_file(target_index):
+        print(f"[GenFile] generate zip for index={target_index}")
         reset_gen_folder(gen_path)
         need_vmp_file_list = get_vmp_file_list(gen_path, vmpFiles)
         for file in need_vmp_file_list:
             vmp_file(file)
-        zip_folder(gen_path, output_path+"\\"+name+"_Run["+random_name(8)+"].zip")
-        if(files_count(output_path) > fileAmount):
-            remove_oldest_file(output_path)
-        sync_remote(remotePath, output_path)
-        print("✅[GenFlie]生成檔案完成")
+        zip_folder(gen_path, output_file_path(target_index))
+        print("[GenFile] zip generated")
 
-    sync_remote(remotePath, output_path)
+    os.makedirs(output_path, exist_ok=True)
+    has_synced_once = False
     while not process_stop:
-        remote_need = int(requests.get(needURL).text);
-        local_count = files_count(output_path)
-        print("💤[Sync]本地檔案/目標數量：", local_count,"/",fileAmount)
-        if(remote_need>0):
-            print("💤[Sync]需要上傳的檔案數量：", remote_need)
+        changed = False
+        try:
+            current_index = get_current_index()
+            target_indexes = set(range(current_index, current_index + fileAmount))
+            print(f"[Sync] index={current_index}, keep={current_index}~{current_index + fileAmount - 1}")
 
-        needGen = max(fileAmount-local_count,remote_need)
-        if(needGen>0):
-            print("▶️[Sync]開始生成檔案")
-            while(needGen>0):
-                if(process_stop):
+            existing_files = list_existing_index_files()
+            existing_indexes = set(existing_files.keys())
+
+            for stale_index in sorted(existing_indexes - target_indexes):
+                stale_path = existing_files[stale_index]
+                print(f"[Sync] remove stale: {stale_path}")
+                os.remove(stale_path)
+                changed = True
+
+            for missing_index in sorted(target_indexes - existing_indexes):
+                if process_stop:
                     break
-                gen_file()
-                needGen -= 1
-        else:
-            print("💤[Sync]沒有需要上傳的檔案")
+                gen_file(missing_index)
+                changed = True
 
-        print("💤[Sync]等待60秒")
+            should_sync = (changed or not has_synced_once) and not process_stop
+            if should_sync:
+                sync_remote(remotePath, output_path)
+                has_synced_once = True
+            elif not changed:
+                print("[Sync] no file changes")
+        except Exception as e:
+            print(f"[Sync] reconcile failed: {e}")
+
+        print("[Sync] wait 60s")
         count = 0
         while(count < 60):
             time.sleep(1)
             count += 1
             if(process_stop):
                 break
-    
+
     while(files_count(output_path)>0):
         remove_oldest_file(output_path)
     sync_remote(remotePath, output_path)

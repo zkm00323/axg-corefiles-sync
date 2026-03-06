@@ -98,8 +98,10 @@ REM 檢查 env.json
 if not exist "build\env.json" (
     echo ⚠️  警告：缺少 build\env.json，創建預設配置...
     echo {> build\env.json
-    echo     "host": "username@your-server.com",>> build\env.json
-    echo     "winscp_path": "C:\\Program Files\\WinSCP\\WinSCP.com">> build\env.json
+    echo     "host": "ubuntu@43.167.205.141",>> build\env.json
+    echo     "ssh_key_path": "C:\\Users\\YOUR_USER\\.ssh\\tony-pc-moneymaker",>> build\env.json
+    echo     "rsync_use_wsl": true,>> build\env.json
+    echo     "rsync_bin": "rsync">> build\env.json
     echo }>> build\env.json
     echo ⚠️  請編輯 build\env.json 設定正確的伺服器資訊
 ) else (

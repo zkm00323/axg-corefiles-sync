@@ -3,7 +3,7 @@
         "*.exe",
         "aig.dll"
     ],
-    "remotePath": "/root/Output/aig3/",
-    "getNeedURL": "https://ashrta.osananajimi.moe/beta2/aig3/needupload",
-    "fileAmount": 15
+    "remotePath": "/srv/axg/aig/output",
+    "getNeedURL": "https://server.axggame.com/download/aig/output/index",
+    "fileAmount": 20
 }
