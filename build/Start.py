@@ -359,23 +359,53 @@ def process(data):
                 key_path = windows_to_wsl_path(key_path)
         local_path = local_path.rstrip("/\\") + "/"
 
-        ssh_cmd = "ssh -o StrictHostKeyChecking=accept-new"
-        if key_path:
-            ssh_cmd += f" -i {shlex.quote(key_path)}"
-
+        ssh_cmd_base = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15"
         remote_target = f"{host}:{remotePath}"
-        rsync_cmd = (
-            f"{rsync_bin} -az --delete --mkpath "
-            f"-e {shlex.quote(ssh_cmd)} "
-            f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
-        )
 
         if rsync_use_wsl:
-            cmd = ["wsl", "-e", "bash", "-lc", rsync_cmd]
+            # WSL often rejects private keys on /mnt/* due to permissive file metadata.
+            if key_path and key_path.startswith("/mnt/"):
+                safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", name.lower())
+                temp_key = f"/tmp/axg_sync_{safe_name}_key"
+                ssh_cmd = f"{ssh_cmd_base} -i {shlex.quote(temp_key)}"
+                rsync_cmd = (
+                    f"{rsync_bin} -az --delete --mkpath "
+                    f"-e {shlex.quote(ssh_cmd)} "
+                    f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+                )
+                bash_cmd = (
+                    f"umask 077; "
+                    f"cp {shlex.quote(key_path)} {shlex.quote(temp_key)} && "
+                    f"chmod 600 {shlex.quote(temp_key)} && "
+                    f"{rsync_cmd}; "
+                    f"rm -f {shlex.quote(temp_key)}"
+                )
+                cmd = ["wsl", "-e", "bash", "-lc", bash_cmd]
+                printed_rsync_cmd = rsync_cmd.replace(temp_key, "<temp_key>")
+            else:
+                ssh_cmd = ssh_cmd_base
+                if key_path:
+                    ssh_cmd += f" -i {shlex.quote(key_path)}"
+                rsync_cmd = (
+                    f"{rsync_bin} -az --delete --mkpath "
+                    f"-e {shlex.quote(ssh_cmd)} "
+                    f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+                )
+                cmd = ["wsl", "-e", "bash", "-lc", rsync_cmd]
+                printed_rsync_cmd = rsync_cmd
         else:
+            ssh_cmd = ssh_cmd_base
+            if key_path:
+                ssh_cmd += f" -i {shlex.quote(key_path)}"
+            rsync_cmd = (
+                f"{rsync_bin} -az --delete --mkpath "
+                f"-e {shlex.quote(ssh_cmd)} "
+                f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+            )
             cmd = rsync_cmd
+            printed_rsync_cmd = rsync_cmd
 
-        print("[Sync] Run rsync:", rsync_cmd)
+        print("[Sync] Run rsync:", printed_rsync_cmd)
         success = execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
         
         if success:
@@ -502,9 +532,9 @@ def process(data):
             if(process_stop):
                 break
 
-    while(files_count(output_path)>0):
-        remove_oldest_file(output_path)
-    sync_remote(remotePath, output_path)
+    if process_stop:
+        while(files_count(output_path)>0):
+            remove_oldest_file(output_path)
     stop_thread(path)
 
 def start_Threads(valid_folders):
