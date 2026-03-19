@@ -1,4 +1,5 @@
 {
+    "enabled": false,
     "vmpFiles": [
         "*.exe",
         "apg.dll"

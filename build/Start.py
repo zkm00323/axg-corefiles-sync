@@ -10,12 +10,9 @@ import re
 import fnmatch
 import shutil
 import zipfile
-import random
-import string
 import subprocess
 import tempfile
 import git
-import signal
 import shlex
 
 process_stop = False
@@ -185,6 +182,22 @@ def validate_setup_json(setup_path, folder_name):
             errors.append("'fileAmount' 必須是整數格式")
         elif config['fileAmount'] <= 0:
             errors.append("'fileAmount' 必須大於 0")
+
+        enabled = config.get('enabled', True)
+        if not isinstance(enabled, bool):
+            errors.append("'enabled' 必須是布林值")
+
+        package_format = config.get('packageFormat', 'zip')
+        if not isinstance(package_format, str):
+            errors.append("'packageFormat' 必須是字串格式")
+        elif package_format not in ('zip', 'sfx-exe'):
+            errors.append("'packageFormat' 僅支援 'zip' 或 'sfx-exe'")
+
+        if 'archiveToolPath' in config:
+            if not isinstance(config['archiveToolPath'], str):
+                errors.append("'archiveToolPath' 必須是字串格式")
+            elif not config['archiveToolPath'].strip():
+                errors.append("'archiveToolPath' 不能為空字串")
         
         if errors:
             return False, config, errors
@@ -262,13 +275,18 @@ def scan_setup_folders():
             print(f"❌[Setup]{folder_name}不符合結構: {'; '.join(all_errors)}")
         else:
             print(f"✔[Setup]{folder_name}符合結構")
+            if not config.get('enabled', True):
+                print(f"[Setup]{folder_name} skipped: enabled=false")
+                continue
             valid_folders.append({
                 'folder_name': folder_name,
                 'folder_path': str(folder.absolute()),
                 'remotePath': config['remotePath'],
                 'getNeedURL': config['getNeedURL'],
                 'vmpFiles': config['vmpFiles'],
-                'fileAmount': config['fileAmount']
+                'fileAmount': config['fileAmount'],
+                'packageFormat': config.get('packageFormat', 'zip'),
+                'archiveToolPath': config.get('archiveToolPath', '')
             })
     
     return valid_folders
@@ -288,6 +306,8 @@ def process(data):
     needURL = data['getNeedURL']
     vmpFiles = data['vmpFiles']
     fileAmount = data['fileAmount']
+    package_format = data.get('packageFormat', 'zip')
+    archive_tool_path = data.get('archiveToolPath', '')
     src_path = os.path.join(path, "Src")
     gen_path = os.path.join(path, "gen")
     output_path = os.path.join(path, "Output")
@@ -342,7 +362,78 @@ def process(data):
                     zip_path = os.path.join(folder_name, rel_path)
                     zipf.write(abs_file, zip_path)
 
-    
+    def resolve_rar_executable():
+        candidates = []
+        if archive_tool_path:
+            candidates.append(archive_tool_path)
+        candidates.extend([
+            shutil.which("rar.exe"),
+            shutil.which("rar"),
+            r"C:\Program Files\WinRAR\rar.exe",
+            r"C:\Program Files (x86)\WinRAR\rar.exe",
+        ])
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if os.path.isfile(candidate):
+                return candidate
+
+        raise FileNotFoundError(
+            f"[GenFile] packageFormat={package_format} requires WinRAR rar.exe. "
+            "Install WinRAR or set archiveToolPath in Setup.json."
+        )
+
+    def create_sfx_archive(path, target_path):
+        rar_exe = resolve_rar_executable()
+        print(f"[GenFile] create sfx archive: {target_path}")
+        target_dir = os.path.dirname(target_path)
+        if target_dir and not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+        if os.path.exists(target_path):
+            os.remove(target_path)
+
+        archive_items = []
+        for item_name in os.listdir(path):
+            archive_items.append(item_name)
+        if not archive_items:
+            raise RuntimeError(f"create sfx archive failed: source folder is empty: {path}")
+        sfx_script = (
+            ";The comment below contains SFX script commands\n"
+            "Path=.\\\n"
+            "Silent=1\n"
+            "Overwrite=1\n"
+            "Setup=AIAIM.exe\n"
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as temp_file:
+            temp_file.write(sfx_script)
+            script_path = temp_file.name
+        try:
+            result = subprocess.run(
+                [rar_exe, "a", "-r", "-sfx", f"-z{script_path}", target_path, *archive_items],
+                cwd=path,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"create sfx archive failed (code={result.returncode}): "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+
+    def get_output_extension():
+        if package_format == "sfx-exe":
+            return ".exe"
+        return ".zip"
+
+    def build_output_file(path, target_path):
+        if package_format == "sfx-exe":
+            create_sfx_archive(path, target_path)
+            return
+        zip_folder(path, target_path)
 
     def sync_remote(remotePath, output_path):
         env = get_env()
@@ -445,7 +536,8 @@ def process(data):
         return name.lower()
 
     code = resolve_code()
-    file_pattern = re.compile(rf"^{re.escape(code)}_(\d+)\.zip$")
+    output_ext = get_output_extension()
+    file_pattern = re.compile(rf"^{re.escape(code)}_(\d+){re.escape(output_ext)}$")
 
     def get_current_index():
         resp = requests.get(needURL, timeout=15)
@@ -459,7 +551,7 @@ def process(data):
         return int(resp.text.strip())
 
     def output_file_path(index_value):
-        return os.path.join(output_path, f"{code}_{index_value}.zip")
+        return os.path.join(output_path, f"{code}_{index_value}{output_ext}")
 
     def list_existing_index_files():
         mapping = {}
@@ -475,13 +567,13 @@ def process(data):
         return mapping
 
     def gen_file(target_index):
-        print(f"[GenFile] generate zip for index={target_index}")
+        print(f"[GenFile] generate {package_format} for index={target_index}")
         reset_gen_folder(gen_path)
         need_vmp_file_list = get_vmp_file_list(gen_path, vmpFiles)
         for file in need_vmp_file_list:
             vmp_file(file)
-        zip_folder(gen_path, output_file_path(target_index))
-        print("[GenFile] zip generated")
+        build_output_file(gen_path, output_file_path(target_index))
+        print(f"[GenFile] {package_format} generated")
 
     os.makedirs(output_path, exist_ok=True)
     has_synced_once = False

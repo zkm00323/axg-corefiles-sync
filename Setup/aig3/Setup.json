@@ -1,9 +1,10 @@
 {
+    "enabled": false,
     "vmpFiles": [
         "*.exe",
         "aig.dll"
     ],
     "remotePath": "/home/ubuntu/Output/aig2/",
     "getNeedURL": "https://ashrta.osananajimi.moe/beta2/aig/needupload",
-    "fileAmount": 0
+    "fileAmount": 20
 }
