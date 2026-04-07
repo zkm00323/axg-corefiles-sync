@@ -1,0 +1,10 @@
+{
+    "enabled": true,
+    "vmpFiles": [
+        "*.exe",
+        "pug.dll"
+    ],
+    "remotePath": "/srv/axg/pug/output",
+    "getNeedURL": "https://server.axggame.com/download/pug/output/index",
+    "fileAmount": 20
+}
