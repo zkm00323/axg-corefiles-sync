@@ -140,6 +140,231 @@ def is_valid_url(url_str):
     except:
         return False
 
+def normalize_remote_paths(config):
+    remote_paths = []
+
+    if 'remotePaths' in config:
+        if not isinstance(config['remotePaths'], list):
+            return None, ["'remotePaths' must be a list"]
+        if len(config['remotePaths']) == 0:
+            return None, ["'remotePaths' cannot be empty"]
+
+        for idx, remote_path in enumerate(config['remotePaths']):
+            if not isinstance(remote_path, str):
+                return None, [f"'remotePaths[{idx}]' must be a string"]
+            if not remote_path.strip():
+                return None, [f"'remotePaths[{idx}]' cannot be empty"]
+            if not is_valid_path(remote_path):
+                return None, [f"'remotePaths[{idx}]' is not a valid path: {remote_path}"]
+            remote_paths.append(remote_path)
+    elif 'remotePath' in config:
+        remote_path = config['remotePath']
+        if not isinstance(remote_path, str):
+            return None, ["'remotePath' must be a string"]
+        if not remote_path.strip():
+            return None, ["'remotePath' cannot be empty"]
+        if not is_valid_path(remote_path):
+            return None, [f"'remotePath' is not a valid path: {remote_path}"]
+        remote_paths.append(remote_path)
+    else:
+        return None, ["missing 'remotePath' or 'remotePaths'"]
+
+    deduped_remote_paths = []
+    seen = set()
+    for remote_path in remote_paths:
+        if remote_path in seen:
+            continue
+        seen.add(remote_path)
+        deduped_remote_paths.append(remote_path)
+
+    return deduped_remote_paths, []
+
+def normalize_remote_targets(config):
+    remote_targets = []
+
+    if 'remoteTargets' in config:
+        if not isinstance(config['remoteTargets'], list):
+            return None, ["'remoteTargets' must be a list"]
+        if len(config['remoteTargets']) == 0:
+            return None, ["'remoteTargets' cannot be empty"]
+
+        for idx, remote_target in enumerate(config['remoteTargets']):
+            if not isinstance(remote_target, dict):
+                return None, [f"'remoteTargets[{idx}]' must be an object"]
+
+            host = remote_target.get('host')
+            remote_path = remote_target.get('remotePath')
+
+            if not isinstance(remote_path, str) or not remote_path.strip():
+                return None, [f"'remoteTargets[{idx}].remotePath' must be a non-empty string"]
+            if not is_valid_path(remote_path):
+                return None, [f"'remoteTargets[{idx}].remotePath' is not a valid path: {remote_path}"]
+
+            normalized_target = {
+                'remotePath': remote_path,
+            }
+
+            if host is not None:
+                if not isinstance(host, str):
+                    return None, [f"'remoteTargets[{idx}].host' must be a string"]
+                if not host.strip():
+                    return None, [f"'remoteTargets[{idx}].host' cannot be empty"]
+                normalized_target['host'] = host.strip()
+
+            if 'ssh_key_path' in remote_target:
+                ssh_key_path = remote_target['ssh_key_path']
+                if not isinstance(ssh_key_path, str):
+                    return None, [f"'remoteTargets[{idx}].ssh_key_path' must be a string"]
+                if ssh_key_path.strip():
+                    normalized_target['ssh_key_path'] = ssh_key_path.strip()
+
+            if 'rsync_use_wsl' in remote_target:
+                rsync_use_wsl = remote_target['rsync_use_wsl']
+                if not isinstance(rsync_use_wsl, bool):
+                    return None, [f"'remoteTargets[{idx}].rsync_use_wsl' must be a boolean"]
+                normalized_target['rsync_use_wsl'] = rsync_use_wsl
+
+            if 'rsync_bin' in remote_target:
+                rsync_bin = remote_target['rsync_bin']
+                if not isinstance(rsync_bin, str):
+                    return None, [f"'remoteTargets[{idx}].rsync_bin' must be a string"]
+                if not rsync_bin.strip():
+                    return None, [f"'remoteTargets[{idx}].rsync_bin' cannot be empty"]
+                normalized_target['rsync_bin'] = rsync_bin.strip()
+
+            remote_targets.append(normalized_target)
+
+        return remote_targets, []
+
+    remote_paths, remote_path_errors = normalize_remote_paths(config)
+    if remote_path_errors:
+        return None, remote_path_errors
+
+    normalized_targets = []
+    for remote_path in remote_paths:
+        normalized_targets.append({
+            'remotePath': remote_path,
+        })
+
+    return normalized_targets, []
+
+def resolve_remote_targets_from_setup(config, env_config):
+    setup_remote_targets = config.get('remoteTargets')
+
+    if isinstance(setup_remote_targets, dict):
+        if len(setup_remote_targets) == 0:
+            return None, ["'remoteTargets' cannot be empty"]
+
+        env_remote_targets = env_config.get('remoteTargets', {})
+        if env_remote_targets and not isinstance(env_remote_targets, dict):
+            return None, ["'build/env.json remoteTargets' must be an object"]
+
+        resolved_targets = []
+        for target_name, remote_path in setup_remote_targets.items():
+            if not isinstance(target_name, str) or not target_name.strip():
+                return None, ["'remoteTargets' keys must be non-empty strings"]
+            if not isinstance(remote_path, str) or not remote_path.strip():
+                return None, [f"'remoteTargets.{target_name}' must be a non-empty string"]
+            if not is_valid_path(remote_path):
+                return None, [f"'remoteTargets.{target_name}' is not a valid path: {remote_path}"]
+
+            target_name = target_name.strip()
+            env_target = env_remote_targets.get(target_name)
+
+            # Preserve legacy behavior for old env.json files that only define top-level host settings.
+            if env_target is None and target_name == "default":
+                env_target = {
+                    "host": env_config.get("host", ""),
+                    "ssh_key_path": env_config.get("ssh_key_path", ""),
+                    "rsync_use_wsl": env_config.get("rsync_use_wsl", True),
+                    "rsync_bin": env_config.get("rsync_bin", "rsync"),
+                }
+
+            if not isinstance(env_target, dict):
+                return None, [f"remote target '{target_name}' is not defined in build/env.json"]
+
+            target_type = env_target.get("type", "rsync")
+            if not isinstance(target_type, str) or not target_type.strip():
+                return None, [f"build/env.json remote target '{target_name}'.type must be a non-empty string"]
+            target_type = target_type.strip().lower()
+
+            resolved_target = {
+                "name": target_name,
+                "type": target_type,
+                "remotePath": remote_path,
+            }
+
+            if target_type == "rsync":
+                host = env_target.get("host", "")
+                if not isinstance(host, str) or not host.strip():
+                    return None, [f"build/env.json remote target '{target_name}' is missing 'host'"]
+                resolved_target["host"] = host.strip()
+
+                ssh_key_path = env_target.get("ssh_key_path", "")
+                if ssh_key_path:
+                    if not isinstance(ssh_key_path, str):
+                        return None, [f"build/env.json remote target '{target_name}'.ssh_key_path must be a string"]
+                    resolved_target["ssh_key_path"] = ssh_key_path.strip()
+
+                if "rsync_use_wsl" in env_target:
+                    if not isinstance(env_target["rsync_use_wsl"], bool):
+                        return None, [f"build/env.json remote target '{target_name}'.rsync_use_wsl must be a boolean"]
+                    resolved_target["rsync_use_wsl"] = env_target["rsync_use_wsl"]
+
+                if "rsync_bin" in env_target:
+                    rsync_bin = env_target["rsync_bin"]
+                    if not isinstance(rsync_bin, str) or not rsync_bin.strip():
+                        return None, [f"build/env.json remote target '{target_name}'.rsync_bin must be a non-empty string"]
+                    resolved_target["rsync_bin"] = rsync_bin.strip()
+            elif target_type == "s3":
+                provider = env_target.get("provider", "Other")
+                endpoint = env_target.get("endpoint", "")
+                bucket = env_target.get("bucket", "")
+                access_key_id = env_target.get("access_key_id", "")
+                secret_access_key = env_target.get("secret_access_key", "")
+
+                if not isinstance(provider, str) or not provider.strip():
+                    return None, [f"build/env.json remote target '{target_name}'.provider must be a non-empty string"]
+                if not isinstance(endpoint, str) or not endpoint.strip():
+                    return None, [f"build/env.json remote target '{target_name}'.endpoint must be a non-empty string"]
+                if not isinstance(bucket, str) or not bucket.strip():
+                    return None, [f"build/env.json remote target '{target_name}'.bucket must be a non-empty string"]
+                if not isinstance(access_key_id, str) or not access_key_id.strip():
+                    return None, [f"build/env.json remote target '{target_name}'.access_key_id must be a non-empty string"]
+                if not isinstance(secret_access_key, str) or not secret_access_key.strip():
+                    return None, [f"build/env.json remote target '{target_name}'.secret_access_key must be a non-empty string"]
+
+                resolved_target["provider"] = provider.strip()
+                resolved_target["endpoint"] = endpoint.strip()
+                resolved_target["bucket"] = bucket.strip()
+                resolved_target["access_key_id"] = access_key_id.strip()
+                resolved_target["secret_access_key"] = secret_access_key.strip()
+
+                region = env_target.get("region", "")
+                if region:
+                    if not isinstance(region, str):
+                        return None, [f"build/env.json remote target '{target_name}'.region must be a string"]
+                    resolved_target["region"] = region.strip()
+
+                if "rclone_bin" in env_target:
+                    rclone_bin = env_target["rclone_bin"]
+                    if not isinstance(rclone_bin, str) or not rclone_bin.strip():
+                        return None, [f"build/env.json remote target '{target_name}'.rclone_bin must be a non-empty string"]
+                    resolved_target["rclone_bin"] = rclone_bin.strip()
+
+                if "no_check_bucket" in env_target:
+                    if not isinstance(env_target["no_check_bucket"], bool):
+                        return None, [f"build/env.json remote target '{target_name}'.no_check_bucket must be a boolean"]
+                    resolved_target["no_check_bucket"] = env_target["no_check_bucket"]
+            else:
+                return None, [f"build/env.json remote target '{target_name}' has unsupported type: {target_type}"]
+
+            resolved_targets.append(resolved_target)
+
+        return resolved_targets, []
+
+    return normalize_remote_targets(config)
+
 def validate_setup_json(setup_path, folder_name):
     """驗證 Setup.json 檔案格式"""
     try:
@@ -209,6 +434,69 @@ def validate_setup_json(setup_path, folder_name):
     except Exception as e:
         return False, None, [f"讀取檔案時發生錯誤: {e}"]
 
+def validate_setup_json_v2(setup_path, folder_name, env_config):
+    """Validate Setup.json and normalize legacy/new remote path fields."""
+    try:
+        with open(setup_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        errors = []
+
+        if 'vmpFiles' not in config:
+            errors.append("missing 'vmpFiles'")
+        elif not isinstance(config['vmpFiles'], list):
+            errors.append("'vmpFiles' must be a list")
+        elif len(config['vmpFiles']) == 0:
+            errors.append("'vmpFiles' cannot be empty")
+
+        remote_targets, remote_target_errors = resolve_remote_targets_from_setup(config, env_config)
+        if remote_target_errors:
+            errors.extend(remote_target_errors)
+        else:
+            config['remoteTargets'] = remote_targets
+
+        if 'getNeedURL' not in config:
+            errors.append("missing 'getNeedURL'")
+        elif not isinstance(config['getNeedURL'], str):
+            errors.append("'getNeedURL' must be a string")
+        elif not config['getNeedURL']:
+            errors.append("'getNeedURL' cannot be empty")
+        elif not is_valid_url(config['getNeedURL']):
+            errors.append(f"'getNeedURL' is not a valid URL: {config['getNeedURL']}")
+
+        if 'fileAmount' not in config:
+            errors.append("missing 'fileAmount'")
+        elif not isinstance(config['fileAmount'], int):
+            errors.append("'fileAmount' must be an integer")
+        elif config['fileAmount'] <= 0:
+            errors.append("'fileAmount' must be greater than 0")
+
+        enabled = config.get('enabled', True)
+        if not isinstance(enabled, bool):
+            errors.append("'enabled' must be a boolean")
+
+        package_format = config.get('packageFormat', 'zip')
+        if not isinstance(package_format, str):
+            errors.append("'packageFormat' must be a string")
+        elif package_format not in ('zip', 'sfx-exe'):
+            errors.append("'packageFormat' must be 'zip' or 'sfx-exe'")
+
+        if 'archiveToolPath' in config:
+            if not isinstance(config['archiveToolPath'], str):
+                errors.append("'archiveToolPath' must be a string")
+            elif not config['archiveToolPath'].strip():
+                errors.append("'archiveToolPath' cannot be empty")
+
+        if errors:
+            return False, config, errors
+
+        return True, config, []
+
+    except json.JSONDecodeError as e:
+        return False, None, [f"invalid JSON: {e}"]
+    except Exception as e:
+        return False, None, [f"unexpected error: {e}"]
+
 def check_src_folder(src_path, folder_name):
     """檢查 Src 資料夾是否存在且不為空"""
     if not os.path.exists(src_path):
@@ -244,6 +532,7 @@ def scan_setup_folders():
         return []
     
     valid_folders = []
+    env_config = get_env()
     
     # 掃描所有子資料夾
     for folder in setup_base.iterdir():
@@ -260,7 +549,7 @@ def scan_setup_folders():
             continue
         
         # 驗證 Setup.json 格式
-        is_valid_json, config, json_errors = validate_setup_json(setup_json_path, folder_name)
+        is_valid_json, config, json_errors = validate_setup_json_v2(setup_json_path, folder_name, env_config)
         if not is_valid_json:
             all_errors.extend(json_errors)
         
@@ -281,7 +570,7 @@ def scan_setup_folders():
             valid_folders.append({
                 'folder_name': folder_name,
                 'folder_path': str(folder.absolute()),
-                'remotePath': config['remotePath'],
+                'remoteTargets': config['remoteTargets'],
                 'getNeedURL': config['getNeedURL'],
                 'vmpFiles': config['vmpFiles'],
                 'fileAmount': config['fileAmount'],
@@ -300,14 +589,15 @@ def process(data):
     global threads_count
     threads_count += 1
 
+    env = get_env()
     name = data['folder_name']
     path = data['folder_path']
-    remotePath = data['remotePath']
+    remote_targets = data['remoteTargets']
     needURL = data['getNeedURL']
     vmpFiles = data['vmpFiles']
     fileAmount = data['fileAmount']
     package_format = data.get('packageFormat', 'zip')
-    archive_tool_path = data.get('archiveToolPath', '')
+    archive_tool_path = env.get('archiveToolPath', '').strip() or data.get('archiveToolPath', '')
     src_path = os.path.join(path, "Src")
     gen_path = os.path.join(path, "gen")
     output_path = os.path.join(path, "Output")
@@ -381,7 +671,7 @@ def process(data):
 
         raise FileNotFoundError(
             f"[GenFile] packageFormat={package_format} requires WinRAR rar.exe. "
-            "Install WinRAR or set archiveToolPath in Setup.json."
+            "Install WinRAR or set archiveToolPath in build/env.json."
         )
 
     def create_sfx_archive(path, target_path):
@@ -435,12 +725,15 @@ def process(data):
             return
         zip_folder(path, target_path)
 
-    def sync_remote(remotePath, output_path):
-        env = get_env()
-        host = env["host"]
-        ssh_key_path = env.get("ssh_key_path", "").strip()
-        rsync_use_wsl = env.get("rsync_use_wsl", True)
-        rsync_bin = env.get("rsync_bin", "rsync").strip() or "rsync"
+    def sync_rsync_target(remote_target, output_path):
+        host = remote_target.get("host", env.get("host", "")).strip()
+        remote_path = remote_target["remotePath"]
+        ssh_key_path = remote_target.get("ssh_key_path", env.get("ssh_key_path", "")).strip()
+        rsync_use_wsl = remote_target.get("rsync_use_wsl", env.get("rsync_use_wsl", True))
+        rsync_bin = remote_target.get("rsync_bin", env.get("rsync_bin", "rsync")).strip() or "rsync"
+
+        if not host:
+            raise ValueError("remote target host is missing")
 
         local_path = output_path
         key_path = ssh_key_path
@@ -451,7 +744,7 @@ def process(data):
         local_path = local_path.rstrip("/\\") + "/"
 
         ssh_cmd_base = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15"
-        remote_target = f"{host}:{remotePath}"
+        remote_target_path = f"{host}:{remote_path}"
 
         if rsync_use_wsl:
             # WSL often rejects private keys on /mnt/* due to permissive file metadata.
@@ -462,7 +755,7 @@ def process(data):
                 rsync_cmd = (
                     f"{rsync_bin} -az --delete --mkpath "
                     f"-e {shlex.quote(ssh_cmd)} "
-                    f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+                    f"{shlex.quote(local_path)} {shlex.quote(remote_target_path)}"
                 )
                 bash_cmd = (
                     f"umask 077; "
@@ -480,7 +773,7 @@ def process(data):
                 rsync_cmd = (
                     f"{rsync_bin} -az --delete --mkpath "
                     f"-e {shlex.quote(ssh_cmd)} "
-                    f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+                    f"{shlex.quote(local_path)} {shlex.quote(remote_target_path)}"
                 )
                 cmd = ["wsl", "-e", "bash", "-lc", rsync_cmd]
                 printed_rsync_cmd = rsync_cmd
@@ -491,18 +784,81 @@ def process(data):
             rsync_cmd = (
                 f"{rsync_bin} -az --delete --mkpath "
                 f"-e {shlex.quote(ssh_cmd)} "
-                f"{shlex.quote(local_path)} {shlex.quote(remote_target)}"
+                f"{shlex.quote(local_path)} {shlex.quote(remote_target_path)}"
             )
             cmd = rsync_cmd
             printed_rsync_cmd = rsync_cmd
 
         print("[Sync] Run rsync:", printed_rsync_cmd)
+        return execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
         success = execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
         
         if success:
             print("✅[Sync]同步完成")
         else:
             print("❌[Sync]同步失敗")
+
+    def sync_s3_target(remote_target, output_path):
+        rclone_bin = remote_target.get("rclone_bin", env.get("rclone_bin", "rclone")).strip() or "rclone"
+        local_path = output_path.rstrip("/\\")
+        remote_name = f"axg_s3_{re.sub(r'[^a-zA-Z0-9_.-]', '_', remote_target.get('name', name.lower()))}"
+        bucket = remote_target["bucket"]
+        remote_path = remote_target["remotePath"].strip("/").replace("\\", "/")
+        remote_spec = f"{remote_name}:{bucket}"
+        if remote_path:
+            remote_spec += f"/{remote_path}"
+
+        config_lines = [
+            f"[{remote_name}]",
+            "type = s3",
+            f"provider = {remote_target.get('provider', 'Other')}",
+            "env_auth = false",
+            f"access_key_id = {remote_target['access_key_id']}",
+            f"secret_access_key = {remote_target['secret_access_key']}",
+            f"endpoint = {remote_target['endpoint']}",
+            f"region = {remote_target.get('region', 'auto') or 'auto'}",
+            f"no_check_bucket = {str(remote_target.get('no_check_bucket', False)).lower()}",
+            "",
+        ]
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".conf", delete=False) as temp_config:
+            temp_config.write("\n".join(config_lines))
+            temp_config_path = temp_config.name
+
+        try:
+            cmd = [rclone_bin, "--config", temp_config_path, "sync", local_path, remote_spec, "--create-empty-src-dirs"]
+            print("[Sync] Run rclone:", f"{rclone_bin} sync <local_output> <s3_remote>")
+            return execute_with_timeout(cmd, timeout_seconds=300, max_retries=3)
+        finally:
+            if os.path.exists(temp_config_path):
+                os.remove(temp_config_path)
+
+    def sync_remote(remote_target, output_path):
+        target_type = remote_target.get("type", "rsync")
+        if target_type == "rsync":
+            success = sync_rsync_target(remote_target, output_path)
+        elif target_type == "s3":
+            success = sync_s3_target(remote_target, output_path)
+        else:
+            raise ValueError(f"unsupported remote target type: {target_type}")
+
+        if success:
+            print("✅[Sync]同步完成")
+        else:
+            print("❌[Sync]同步失敗")
+
+    def sync_all_remote_targets():
+        for remote_target in remote_targets:
+            target_name = remote_target.get("name", "<inline>")
+            target_type = remote_target.get("type", "rsync")
+            target_host = remote_target.get("host", env.get("host", ""))
+            target_path = remote_target["remotePath"]
+            if target_type == "s3":
+                target_bucket = remote_target.get("bucket", "")
+                print(f"[Sync] target={target_name} s3://{target_bucket}/{target_path}")
+            else:
+                print(f"[Sync] target={target_name} {target_host}:{target_path}")
+            sync_remote(remote_target, output_path)
 
     def files_count(folder):
         if not os.path.exists(folder):
@@ -603,13 +959,13 @@ def process(data):
                 changed = True
                 generated_any = True
                 if not process_stop:
-                    sync_remote(remotePath, output_path)
+                    sync_all_remote_targets()
                     has_synced_once = True
 
             # If only stale files were removed, or first run has not synced yet, sync once.
             should_sync = ((stale_changed and not generated_any) or not has_synced_once) and not process_stop
             if should_sync:
-                sync_remote(remotePath, output_path)
+                sync_all_remote_targets()
                 has_synced_once = True
             elif not changed:
                 print("[Sync] no file changes")

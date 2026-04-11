@@ -81,7 +81,17 @@ pip install requests
 ```json
 {
     "host": "username@your-server.com",
-    "winscp_path": "C:\\Program Files\\WinSCP\\WinSCP.com"
+    "archiveToolPath": "C:\\Program Files\\WinRAR\\rar.exe",
+    "remoteTargets": {
+        "prod-a": {
+            "host": "user1@server-a",
+            "ssh_key_path": "C:\\Users\\YOUR_USER\\.ssh\\server-a-key"
+        },
+        "prod-b": {
+            "host": "user2@server-b",
+            "ssh_key_path": "C:\\Users\\YOUR_USER\\.ssh\\server-b-key"
+        }
+    }
 }
 ```
 
@@ -121,7 +131,10 @@ axg-corefiles-sync/
 ```json
 {
     "vmpFiles": ["*.exe", "*.dll"],
-    "remotePath": "/remote/path/on/server",
+    "remoteTargets": {
+        "prod-a": "/remote/path/on/server-a",
+        "prod-b": "/remote/path/on/server-b"
+    },
     "getNeedURL": "https://your-server.com/api/need-count",
     "fileAmount": 10
 }
@@ -129,7 +142,12 @@ axg-corefiles-sync/
 
 **參數說明：**
 - `vmpFiles`：需要加密的檔案模式陣列（支援萬用字元）
-- `remotePath`：遠端伺服器上的目標路徑
+- `remoteTargets`：同步目標列表，每筆可設定自己的 `host` 與 `remotePath`
+- `remoteTargets[].host`：可選，未設定時沿用 `build/env.json` 的 `host`
+- `remoteTargets[].ssh_key_path`：可選，指定該目標專用 SSH key
+- `remoteTargets[].rsync_use_wsl`：可選，覆寫該目標是否走 WSL rsync
+- `remoteTargets[].rsync_bin`：可選，覆寫該目標使用的 rsync 指令
+- `remotePath`、`remotePaths`：舊版格式仍相容，會沿用 `build/env.json` 的 `host`
 - `getNeedURL`：獲取遠端需求的 API URL
 - `fileAmount`：本地保留的檔案數量上限
 
@@ -241,3 +259,44 @@ pip install requests
 ## 支援
 
 如有問題，請聯繫開發團隊。 
+
+## Remote Target V2 Example
+
+`build/env.json`
+
+```json
+{
+    "host": "username@legacy-rsync-host",
+    "archiveToolPath": "C:\\Program Files\\WinRAR\\rar.exe",
+    "remoteTargets": {
+        "prod-rsync": {
+            "type": "rsync",
+            "host": "user@server-a",
+            "ssh_key_path": "C:\\Users\\YOUR_USER\\.ssh\\server-a-key",
+            "rsync_use_wsl": true,
+            "rsync_bin": "rsync"
+        },
+        "backup-s3": {
+            "type": "s3",
+            "provider": "Other",
+            "endpoint": "https://s3.example.com",
+            "bucket": "axg-backup",
+            "region": "auto",
+            "access_key_id": "YOUR_ACCESS_KEY",
+            "secret_access_key": "YOUR_SECRET_KEY",
+            "rclone_bin": "rclone"
+        }
+    }
+}
+```
+
+`Setup/<name>/Setup.json`
+
+```json
+{
+    "remoteTargets": {
+        "prod-rsync": "/srv/axg/apg1/output",
+        "backup-s3": "apg1/output"
+    }
+}
+```

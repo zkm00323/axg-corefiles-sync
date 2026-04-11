@@ -4,7 +4,10 @@
         "*.exe",
         "apg.dll"
     ],
-    "remotePath": "/srv/axg/apg/output",
+    "remoteTargets": {
+        "default": "/srv/axg/apg/output",
+        "s3-space": "/corefiles/apg/output"
+    },
     "getNeedURL": "https://server.axggame.com/download/apg/output/index",
     "fileAmount": 20
 }

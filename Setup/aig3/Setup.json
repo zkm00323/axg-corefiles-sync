@@ -4,7 +4,10 @@
         "*.exe",
         "aig.dll"
     ],
-    "remotePath": "/home/ubuntu/Output/aig2/",
+    "remoteTargets": {
+        "default": "/home/ubuntu/Output/aig2/",
+        "s3-space": "/corefiles/aig3/output"
+    },
     "getNeedURL": "https://ashrta.osananajimi.moe/beta2/aig/needupload",
     "fileAmount": 20
 }

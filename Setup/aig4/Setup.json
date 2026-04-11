@@ -4,7 +4,10 @@
         "*.exe",
         "aig.dll"
     ],
-    "remotePath": "/srv/axg/aig/output",
+    "remoteTargets": {
+        "default": "/srv/axg/aig/output",
+        "s3-space": "/corefiles/aig4/output"
+    },
     "getNeedURL": "https://server.axggame.com/download/aig/output/index",
     "fileAmount": 20
 }
