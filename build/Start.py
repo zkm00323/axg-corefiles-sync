@@ -20,6 +20,14 @@ threads_count = 0
 
 def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5):
     """執行命令並處理超時和重試"""
+    def get_cmd_display_name(command):
+        if isinstance(command, str):
+            parts = command.split()
+            return parts[0] if parts else command
+        if isinstance(command, (list, tuple)) and command:
+            return str(command[0])
+        return str(command)
+
     def decode_output(raw):
         if raw is None:
             return ""
@@ -35,6 +43,7 @@ def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5)
     for attempt in range(max_retries):
         try:
             print(f"🔄[Execute] 嘗試執行命令 (第 {attempt + 1} 次)")
+            print(f"[Execute] cmd={cmd}")
             result = subprocess.run(
                 cmd,
                 shell=isinstance(cmd, str),
@@ -63,9 +72,16 @@ def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5)
                     print("⚠️[Execute] WSL 尚未安裝發行版，請先安裝 Ubuntu 後再重試。")
                     return False
                     
+        except FileNotFoundError as e:
+            missing_cmd = get_cmd_display_name(cmd)
+            print(f"[Execute] missing executable: {missing_cmd}")
+            if getattr(e, "filename", None):
+                print(f"[Execute] missing path: {e.filename}")
+            return False
         except subprocess.TimeoutExpired:
             print(f"⏰[Execute] 命令執行超時 ({timeout_seconds} 秒)")
         except Exception as e:
+            print(f"[Execute] cmd failed: {cmd}")
             print(f"❌[Execute] 命令執行異常: {e}")
         
         if attempt < max_retries - 1:
@@ -615,7 +631,16 @@ def process(data):
         print("⏳[GenFlie]加密檔案"+file)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         vmprotect_exe = os.path.join(script_dir, "VMProtect_Con.exe")
-        os.system(f"{vmprotect_exe} {file} {file}")
+        result = subprocess.run(
+            [vmprotect_exe, file, file],
+            capture_output=True,
+            text=False,
+        )
+        if result.returncode != 0:
+            stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            details = stderr.strip() or stdout.strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"VMProtect failed for {file}: {details}")
 
     def reset_gen_folder(path):
         # 如果 gen 存在就整個刪掉
@@ -674,6 +699,50 @@ def process(data):
             "Install WinRAR or set archiveToolPath in build/env.json."
         )
 
+    def resolve_local_executable(executable_name):
+        if not executable_name:
+            return None
+        executable_name = executable_name.strip()
+        if not executable_name:
+            return None
+        if os.path.isfile(executable_name):
+            return executable_name
+        return shutil.which(executable_name)
+
+    def ensure_local_executable(executable_name, purpose):
+        resolved = resolve_local_executable(executable_name)
+        if resolved:
+            print(f"[Check] {purpose} executable resolved: {resolved}")
+            return resolved
+        raise FileNotFoundError(
+            f"{purpose} requires executable '{executable_name}', but it was not found. "
+            "Install it or set the full path in build/env.json."
+        )
+
+    def ensure_file_exists(file_path, purpose):
+        if not file_path:
+            print(f"[Check] {purpose}: <empty>")
+            return
+        if os.path.isfile(file_path):
+            print(f"[Check] {purpose} found: {file_path}")
+            return
+        raise FileNotFoundError(f"{purpose} not found: {file_path}")
+
+    def ensure_wsl_command(wsl_command, purpose):
+        ensure_local_executable("wsl", f"{purpose} via WSL")
+        print(f"[Check] probing WSL command: {wsl_command}")
+        probe = subprocess.run(
+            ["wsl", "-e", "bash", "-lc", f"command -v {shlex.quote(wsl_command)} >/dev/null 2>&1"],
+            capture_output=True,
+            text=True,
+        )
+        print(f"[Check] WSL probe rc={probe.returncode} cmd={wsl_command}")
+        if probe.returncode != 0:
+            raise FileNotFoundError(
+                f"{purpose} requires '{wsl_command}' inside WSL, but it was not found. "
+                "Install it in your WSL distro or set rsync_use_wsl=false and provide a Windows executable."
+            )
+
     def create_sfx_archive(path, target_path):
         rar_exe = resolve_rar_executable()
         print(f"[GenFile] create sfx archive: {target_path}")
@@ -731,16 +800,31 @@ def process(data):
         ssh_key_path = remote_target.get("ssh_key_path", env.get("ssh_key_path", "")).strip()
         rsync_use_wsl = remote_target.get("rsync_use_wsl", env.get("rsync_use_wsl", True))
         rsync_bin = remote_target.get("rsync_bin", env.get("rsync_bin", "rsync")).strip() or "rsync"
+        target_name = remote_target.get("name", "<inline>")
 
         if not host:
             raise ValueError("remote target host is missing")
 
         local_path = output_path
         key_path = ssh_key_path
+        print(f"[Sync] rsync target={target_name}")
+        print(f"[Sync] rsync host={host}")
+        print(f"[Sync] rsync remote_path={remote_path}")
+        print(f"[Sync] rsync local_output={output_path}")
+        print(f"[Sync] rsync use_wsl={rsync_use_wsl}")
+        print(f"[Sync] rsync bin={rsync_bin}")
+        print(f"[Sync] rsync ssh_key={ssh_key_path or '<empty>'}")
+        ensure_file_exists(ssh_key_path, "SSH key")
         if rsync_use_wsl:
+            ensure_wsl_command("bash", "rsync sync")
+            ensure_wsl_command(rsync_bin, "rsync sync")
             local_path = windows_to_wsl_path(local_path)
             if key_path:
                 key_path = windows_to_wsl_path(key_path)
+        else:
+            ensure_local_executable(rsync_bin, "rsync sync")
+        print(f"[Sync] rsync local_path_resolved={local_path}")
+        print(f"[Sync] rsync ssh_key_resolved={key_path or '<empty>'}")
         local_path = local_path.rstrip("/\\") + "/"
 
         ssh_cmd_base = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15"
@@ -800,6 +884,7 @@ def process(data):
 
     def sync_s3_target(remote_target, output_path):
         rclone_bin = remote_target.get("rclone_bin", env.get("rclone_bin", "rclone")).strip() or "rclone"
+        ensure_local_executable(rclone_bin, "S3 sync")
         local_path = output_path.rstrip("/\\")
         remote_name = f"axg_s3_{re.sub(r'[^a-zA-Z0-9_.-]', '_', remote_target.get('name', name.lower()))}"
         bucket = remote_target["bucket"]
@@ -807,6 +892,12 @@ def process(data):
         remote_spec = f"{remote_name}:{bucket}"
         if remote_path:
             remote_spec += f"/{remote_path}"
+        print(f"[Sync] s3 target={remote_target.get('name', '<inline>')}")
+        print(f"[Sync] s3 local_output={local_path}")
+        print(f"[Sync] s3 bucket={bucket}")
+        print(f"[Sync] s3 remote_path={remote_path}")
+        print(f"[Sync] s3 remote_spec={remote_spec}")
+        print(f"[Sync] s3 rclone_bin={rclone_bin}")
 
         config_lines = [
             f"[{remote_name}]",
@@ -848,6 +939,7 @@ def process(data):
             print("❌[Sync]同步失敗")
 
     def sync_all_remote_targets():
+        print(f"[Sync] begin targets count={len(remote_targets)}")
         for remote_target in remote_targets:
             target_name = remote_target.get("name", "<inline>")
             target_type = remote_target.get("type", "rsync")
