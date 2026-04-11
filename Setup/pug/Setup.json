@@ -7,7 +7,7 @@
     ],
     "remoteTargets": {
         "default": "/srv/axg/pug/output",
-        "s3-space": "/corefiles/pug/output"
+        "s3-space": "/corefiles/pug"
     },
     "getNeedURL": "https://server.axggame.com/download/pug/output/index",
     "fileAmount": 20,

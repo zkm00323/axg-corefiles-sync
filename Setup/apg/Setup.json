@@ -6,7 +6,7 @@
     ],
     "remoteTargets": {
         "default": "/srv/axg/apg/output",
-        "s3-space": "/corefiles/apg/output"
+        "s3-space": "/corefiles/apg"
     },
     "getNeedURL": "https://server.axggame.com/download/apg/output/index",
     "fileAmount": 20
