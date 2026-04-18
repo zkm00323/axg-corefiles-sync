@@ -617,7 +617,6 @@ def process(data):
     src_path = os.path.join(path, "Src")
     gen_path = os.path.join(path, "gen")
     output_path = os.path.join(path, "Output")
-    vmp_project_file = os.path.join(path, "Random.vmp")
 
     def windows_to_wsl_path(path_str):
         if re.match(r"^[a-zA-Z]:[\\/]", path_str):
@@ -632,11 +631,8 @@ def process(data):
         print("⏳[GenFlie]加密檔案"+file)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         vmprotect_exe = os.path.join(script_dir, "VMProtect_Con.exe")
-        command = [vmprotect_exe, file, file]
-        if os.path.exists(vmp_project_file):
-            command.extend(["-pf", vmp_project_file])
         result = subprocess.run(
-            command,
+            [vmprotect_exe, file, file],
             capture_output=True,
             text=False,
         )
