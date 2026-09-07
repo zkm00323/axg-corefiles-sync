@@ -5,7 +5,7 @@
         "aig.dll"
     ],
     "remoteTargets": {
-        "default": "/srv/axg/aig/output",
+        "default": "/srv/axg/aig5/output",
         "s3-space": "/corefiles/aig5"
     },
     "getNeedURL": "https://server.axggame.com/download/aig/output/index",
