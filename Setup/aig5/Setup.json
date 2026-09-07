@@ -8,6 +8,6 @@
         "default": "/srv/axg/aig5/output",
         "s3-space": "/corefiles/aig5"
     },
-    "getNeedURL": "https://server.axggame.com/download/aig/output/index",
+    "getNeedURL": "https://server.axggame.com/download/aig5/output/index",
     "fileAmount": 20
 }
