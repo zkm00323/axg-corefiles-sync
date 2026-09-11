@@ -151,6 +151,92 @@ axg-corefiles-sync/
 - `getNeedURL`：獲取遠端需求的 API URL
 - `fileAmount`：本地保留的檔案數量上限
 
+## 發布版本號(release)——預設關閉
+
+打開之後,這條產品線每偵測到一次**自己的 `Src/` 有新 commit**,就會在打包之前先跟
+server 取一個新版本號、把號碼寫進待打包的 `Res/Version.json`,等 `fileAmount` 份全部
+上傳成功之後才 publish。新版先是 beta(客戶端靜默),擺滿 7 天沒被新版蓋過才自動升
+格成正式版,正式版號往上跳之後客戶端才會出現更新按鈕。
+
+**沒有寫 `release` 這個欄位、或 `release.enabled` 不是 `true` 的產品,行為與加這條線
+之前逐字相同,一個封包都不會送出去。**
+
+### `Setup/<product>/Setup.json`
+
+```json
+{
+    "release": {
+        "enabled": true,
+        "target": "aig5",
+        "apiBaseUrl": "https://server.axggame.com",
+        "maxPublishAttempts": 5,
+        "versionWriter": {
+            "mode": "plaintext-json",
+            "path": "Res/Version.json",
+            "versionKey": "Version"
+        }
+    }
+}
+```
+
+| 欄位 | 預設 | 語意 |
+| --- | --- | --- |
+| `release` | 不存在 | 整個物件不存在 = 這條產品線不走發布流程 |
+| `release.enabled` | `false` | 總開關。`false` 時底下所有欄位都不會被讀 |
+| `release.target` | 資料夾名的小寫 | **發布目標名**(`aig4` / `aig5` / `aug1` / `apg1`)。注意這**不是** `getNeedURL` 裡的下載代碼——aig4 與 aig5 的下載代碼都是 `aig`,但發布版本線必須分開 |
+| `release.apiBaseUrl` | `https://server.axggame.com` | release API 的 base URL。環境變數 `AXG_RELEASE_API_BASE_URL` 會蓋過它(本機測試用 `http://localhost:3500`) |
+| `release.maxPublishAttempts` | `5` | publish 失敗的重試上限。用完就放棄並記一筆 ERROR,**不會**讓打包線程卡死或無限重打 |
+| `release.versionWriter.mode` | 必填 | `plaintext-json` 或 `respack`,見下 |
+| `release.versionWriter.versionKey` | `Version` | 寫進 JSON 的哪個 key |
+| `release.versionWriter.path` | 必填(`plaintext-json`) | 相對 `gen/` 的明文 JSON 路徑,例 `Res/Version.json`。檔案必須已經存在於 `Src/` |
+| `release.versionWriter.templatePath` | `Version.template.json`(`respack`) | 相對 `Setup/<product>/` 的**明文模板**,發布時會複製一份、補上版本號,再用 `respack update` 換進加密樹 |
+| `release.versionWriter.treeSubdir` | `""`(`respack`) | 加密樹在 `gen/` 底下的哪個子目錄,空字串 = `gen/` 根目錄 |
+
+`versionWriter.mode`:
+
+- **`plaintext-json`** —— `Src/` 裡有一份明文 JSON 時用。直接把版本號合併進去。
+- **`respack`** —— `Src/` 裡是 respack 產出的加密資源樹時用。因為加密樹讀不出原內容,
+  所以要另外準備一份明文模板;打包時把「模板 + 版本號」寫成一個只含 `Version.json`
+  的暫時 `Res/` 目錄,再跑 `respack update`(respack 只碰來源目錄裡出現過的檔案,所以
+  樹裡其它東西一個位元組都不會被重寫)。
+
+### 密鑰與工具路徑(`build/env.json`,已在 `.gitignore` 裡)
+
+**密鑰永遠不寫進 `Setup.json`** —— 那份檔案是 commit 進 repo 的。
+
+```json
+{
+    "release": {
+        "token": "PUT_THE_RELEASE_TOKEN_HERE",
+        "apiBaseUrl": "",
+        "respackPath": "C:\\path\\to\\respack.exe",
+        "keyFile": "C:\\path\\to\\key.bin"
+    }
+}
+```
+
+環境變數優先於 `build/env.json`:`AXG_RELEASE_TOKEN`、`AXG_RELEASE_API_BASE_URL`、
+`AXG_RESPACK_PATH`、`AXG_RES_KEY_FILE`。
+
+打開了 `release.enabled` 卻找不到 token(或 `respack` 模式缺工具/金鑰)時,那個產品
+會在掃描階段**驗證失敗並被跳過**,而不是安靜地照舊打包 —— 帶著舊版號的包送出去,是一
+種不會有任何錯誤訊息的錯誤。
+
+### 狀態檔
+
+`build/release-state/<product>.json`(已在 `.gitignore` 裡)記錄「這條線目前綁在哪個
+commit、取到哪個號、publish 了沒」。同一個 commit 重跑一百輪、打包機重啟、一次 fetch
+拉進三個 commit,都只會停在同一個號上,不會連續 +2。
+
+### 測試
+
+```powershell
+build\venv\Scripts\python.exe -m pip install -r build\requirements-dev.txt
+build\venv\Scripts\python.exe -m pytest build\tests -q
+```
+
+測試全程使用替身,不會連到 `server.axggame.com`,也不會觸發任何一次真的發布。
+
 ### 檔案結構要求
 
 每個專案資料夾必須包含：

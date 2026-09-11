@@ -15,8 +15,51 @@ import tempfile
 import git
 import shlex
 
+import release_flow
+
 process_stop = False
 threads_count = 0
+
+# 發布狀態檔的家。放在 build/ 底下(已加進 .gitignore)而不是 Setup/<product>/:git 更新
+# 監控會對這個 repo 做 pull / reset --hard,狀態檔放在被追蹤的路徑上會被洗掉,也會讓工作
+# 目錄變髒而擋住下一次 pull。
+RELEASE_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release-state")
+PROJECT_ROOT = str(Path(__file__).parent.parent)
+
+# ---------------------------------------------------------------------------
+# Telegram 通知(選用功能,預設關閉)。
+#
+# 契約(https://github.com/zkm00323/telegram-notifier):POST /notify,
+# JSON body {project, level, message},level 限 critical/error/warning/info,
+# 不需要 token/secret 驗證,chat id 由 notifier 服務端固定(呼叫端不用管)。
+#
+# 優先序：環境變數 > build/env.json 的 "telegramNotifier" 區塊。兩邊都沒填時
+# url 是空字串，notify_telegram() 直接不發送——沒設定=功能關閉，不影響既有行為。
+# ---------------------------------------------------------------------------
+
+def resolve_telegram_notifier_config(env_config):
+    telegram_config = env_config.get("telegramNotifier") if isinstance(env_config, dict) else None
+    if not isinstance(telegram_config, dict):
+        telegram_config = {}
+    url = os.environ.get("AXG_TELEGRAM_NOTIFIER_URL") or telegram_config.get("url") or ""
+    return {"url": url.strip()}
+
+def notify_telegram(notifier_url, project, message):
+    """發送一則 Telegram 通知。任何失敗都只記 log，絕不 raise——不能拖垮打包主流程。"""
+    if not notifier_url:
+        return
+    try:
+        resp = requests.post(
+            notifier_url,
+            json={"project": project, "level": "info", "message": message},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            print(f"✅[Notify] telegram notified: project={project}")
+        else:
+            print(f"⚠️[Notify] telegram notify non-200: status={resp.status_code} body={resp.text[:200]}")
+    except Exception as e:
+        print(f"⚠️[Notify] telegram notify failed: {e}")
 
 def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5):
     """執行命令並處理超時和重試"""
@@ -503,6 +546,17 @@ def validate_setup_json_v2(setup_path, folder_name, env_config):
             elif not config['archiveToolPath'].strip():
                 errors.append("'archiveToolPath' cannot be empty")
 
+        # 發布版本號流程(預設關閉)。`release` 這個 key 不存在、或 enabled 不是 true
+        # 時 release_config 是 None,底下所有 release 相關的程式碼都不會被走到——沒有
+        # 打開開關的產品行為與加這條線之前逐字相同。
+        release_config, release_errors = release_flow.parse_release_config(config, folder_name)
+        if release_errors:
+            errors.extend(release_errors)
+        elif release_config is not None:
+            secrets = release_flow.resolve_release_secrets(env_config)
+            errors.extend(release_flow.validate_release_runtime(release_config, secrets))
+        config['release'] = release_config
+
         if errors:
             return False, config, errors
 
@@ -591,7 +645,8 @@ def scan_setup_folders():
                 'vmpFiles': config['vmpFiles'],
                 'fileAmount': config['fileAmount'],
                 'packageFormat': config.get('packageFormat', 'zip'),
-                'archiveToolPath': config.get('archiveToolPath', '')
+                'archiveToolPath': config.get('archiveToolPath', ''),
+                'release': config.get('release')
             })
     
     return valid_folders
@@ -614,6 +669,7 @@ def process(data):
     fileAmount = data['fileAmount']
     package_format = data.get('packageFormat', 'zip')
     archive_tool_path = env.get('archiveToolPath', '').strip() or data.get('archiveToolPath', '')
+    telegram_notifier_url = resolve_telegram_notifier_config(env).get('url', '')
     src_path = os.path.join(path, "Src")
     gen_path = os.path.join(path, "gen")
     output_path = os.path.join(path, "Output")
@@ -937,8 +993,12 @@ def process(data):
             print("✅[Sync]同步完成")
         else:
             print("❌[Sync]同步失敗")
+        return bool(success)
 
     def sync_all_remote_targets():
+        # 回傳「每一個 remote target 都成功」。發布流程靠這個判斷能不能 publish,
+        # 沒有開發布的產品沒有任何呼叫端看這個回傳值,行為不變。
+        all_ok = True
         print(f"[Sync] begin targets count={len(remote_targets)}")
         for remote_target in remote_targets:
             target_name = remote_target.get("name", "<inline>")
@@ -950,7 +1010,9 @@ def process(data):
                 print(f"[Sync] target={target_name} s3://{target_bucket}/{target_path}")
             else:
                 print(f"[Sync] target={target_name} {target_host}:{target_path}")
-            sync_remote(remote_target, output_path)
+            if not sync_remote(remote_target, output_path):
+                all_ok = False
+        return all_ok
 
     def files_count(folder):
         if not os.path.exists(folder):
@@ -1014,9 +1076,70 @@ def process(data):
                 mapping[int(match.group(1))] = fpath
         return mapping
 
+    # ---------------------------------------------------------------------
+    # 發布版本號流程(Setup.json 的 release.enabled,預設關閉)
+    # ---------------------------------------------------------------------
+    release_cycle = None
+    release_config = data.get('release')
+    if release_config:
+        release_secrets = release_flow.resolve_release_secrets(env)
+        base_url = release_secrets.get('apiBaseUrl') or release_config['apiBaseUrl']
+        release_cycle = release_flow.ReleaseCycle(
+            folder_name=name,
+            product_dir=path,
+            gen_path=gen_path,
+            release_config=release_config,
+            secrets=release_secrets,
+            state_dir=RELEASE_STATE_DIR,
+            repo_root=PROJECT_ROOT,
+            client=release_flow.ReleaseClient(base_url, release_secrets['token']),
+        )
+        print(
+            f"[Release] {name}: enabled target={release_config['target']} "
+            f"base={base_url} writer={release_config['versionWriter']['mode']}"
+        )
+
+    def notify_first_upload_of_new_version():
+        """新版本的第一個安裝包成功上傳遠端後，發一次 Telegram 通知。
+
+        「版本」只在 release.enabled 開啟時才有意義（release_cycle 非 None，版本號綁
+        Setup/<product>/Src 的 commit）；沒開的產品這裡直接 return，不發送任何東西——
+        跟 release_flow 本身「沒開關的產品行為不變」的原則一致。
+
+        去重：沿用 release_flow 既有的狀態檔（build/release-state/<folder>.json），在
+        release_cycle.state 裡加一個 uploadNotifiedVersion 欄位，跟 reserve/publish 共用
+        同一份持久化機制，重啟後不會對同一版本重發。新版本 reserve 時 release_cycle.state
+        會被整個換掉（release_flow.ensure_reserved 的既有行為），這個欄位自然一併重置。
+        """
+        if release_cycle is None or not telegram_notifier_url:
+            return
+        version = release_cycle.version
+        if version is None:
+            return
+        if release_cycle.state.get("uploadNotifiedVersion") == version:
+            return
+        target_names = ", ".join(
+            rt.get("name", "<inline>") for rt in remote_targets
+        ) or "<inline>"
+        message = (
+            f"product={name}\n"
+            f"release_target={release_cycle.target}\n"
+            f"version={version}\n"
+            f"remote_targets={target_names}\n"
+            f"time={time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        notify_telegram(telegram_notifier_url, name, message)
+        release_cycle.state["uploadNotifiedVersion"] = version
+        release_flow.save_state(release_cycle.state_file, release_cycle.state)
+
     def gen_file(target_index):
         print(f"[GenFile] generate {package_format} for index={target_index}")
         reset_gen_folder(gen_path)
+        # 版本號必須在 VMProtect 與壓縮之前寫進去。Setup/<product>/Src 是已經打包
+        # 好的成品,事後改不進去——這也是「打包前取號」而不是「push 之後才 +1」的全部
+        # 理由。寫失敗一律拋例外:寧可這一輪不產檔,也不要送出一包帶舊版號的成品。
+        if release_cycle is not None:
+            release_cycle.stamp()
         need_vmp_file_list = get_vmp_file_list(gen_path, vmpFiles)
         for file in need_vmp_file_list:
             vmp_file(file)
@@ -1025,42 +1148,86 @@ def process(data):
 
     os.makedirs(output_path, exist_ok=True)
     has_synced_once = False
+    last_sync_ok = False
     while not process_stop:
         changed = False
         try:
-            current_index = get_current_index()
-            target_indexes = set(range(current_index, current_index + fileAmount))
-            print(f"[Sync] index={current_index}, keep={current_index}~{current_index + fileAmount - 1}")
+            # 發布流程只有在 Setup.json 打開 release.enabled 時才存在。release_cycle 是
+            # None 的產品,這個 while 迴圈與加這條線之前逐字相同。
+            skip_pass = False
+            if release_cycle is not None:
+                reserved_ok, version_changed = release_cycle.ensure_reserved()
+                if not reserved_ok:
+                    skip_pass = True
+                elif version_changed:
+                    # 版本號換了 -> Output 裡既有的成品帶的是舊版號,不能再送出去。
+                    # 全部作廢重產,而不是讓新舊版號的包混在同一個下載視窗裡。
+                    for stale_index, stale_path in sorted(list_existing_index_files().items()):
+                        print(f"[Release] reserved version changed, drop stale output: {stale_path}")
+                        os.remove(stale_path)
+                        changed = True
 
-            existing_files = list_existing_index_files()
-            existing_indexes = set(existing_files.keys())
-            stale_changed = False
+            if skip_pass:
+                # ensure_reserved() 已經把原因記成一行 ERROR。這裡不產檔、不上傳,
+                # 60 秒後整輪重來——線程沒有卡死,server 回來就會自己接上。
+                print("[Sync] release version unavailable, skip this pass")
+            else:
+                current_index = get_current_index()
+                target_indexes = set(range(current_index, current_index + fileAmount))
+                print(f"[Sync] index={current_index}, keep={current_index}~{current_index + fileAmount - 1}")
 
-            for stale_index in sorted(existing_indexes - target_indexes):
-                stale_path = existing_files[stale_index]
-                print(f"[Sync] remove stale: {stale_path}")
-                os.remove(stale_path)
-                changed = True
-                stale_changed = True
+                existing_files = list_existing_index_files()
+                existing_indexes = set(existing_files.keys())
+                stale_changed = False
 
-            generated_any = False
-            for missing_index in sorted(target_indexes - existing_indexes):
-                if process_stop:
-                    break
-                gen_file(missing_index)
-                changed = True
-                generated_any = True
-                if not process_stop:
-                    sync_all_remote_targets()
+                for stale_index in sorted(existing_indexes - target_indexes):
+                    stale_path = existing_files[stale_index]
+                    print(f"[Sync] remove stale: {stale_path}")
+                    os.remove(stale_path)
+                    changed = True
+                    stale_changed = True
+
+                generated_any = False
+                for missing_index in sorted(target_indexes - existing_indexes):
+                    if process_stop:
+                        break
+                    gen_file(missing_index)
+                    changed = True
+                    generated_any = True
+                    if not process_stop:
+                        last_sync_ok = sync_all_remote_targets()
+                        has_synced_once = True
+
+                # If only stale files were removed, or first run has not synced yet, sync once.
+                should_sync = ((stale_changed and not generated_any) or not has_synced_once) and not process_stop
+                if should_sync:
+                    last_sync_ok = sync_all_remote_targets()
                     has_synced_once = True
+                elif not changed:
+                    print("[Sync] no file changes")
 
-            # If only stale files were removed, or first run has not synced yet, sync once.
-            should_sync = ((stale_changed and not generated_any) or not has_synced_once) and not process_stop
-            if should_sync:
-                sync_all_remote_targets()
-                has_synced_once = True
-            elif not changed:
-                print("[Sync] no file changes")
+                if release_cycle is not None and release_cycle.needs_publish and not process_stop:
+                    present = set(list_existing_index_files().keys())
+                    all_present = target_indexes.issubset(present)
+                    if all_present and not last_sync_ok:
+                        # 檔案都產完了,但上一次上傳沒有全部成功。publish 的前提是
+                        # 「20 份都真的在遠端」,所以先把上傳補起來再說。
+                        print("[Release] 前一次同步未全部成功,publish 前重試一次上傳")
+                        last_sync_ok = sync_all_remote_targets()
+                        has_synced_once = True
+                    if release_flow.should_publish(release_cycle, target_indexes, present, last_sync_ok):
+                        release_cycle.try_publish()
+                    else:
+                        print(
+                            f"[Release] {name}: 尚未 publish —— "
+                            f"present={all_present} sync_ok={last_sync_ok}"
+                        )
+
+                if last_sync_ok:
+                    try:
+                        notify_first_upload_of_new_version()
+                    except Exception as e:
+                        print(f"⚠️[Notify] notify check failed: {e}")
         except Exception as e:
             print(f"[Sync] reconcile failed: {e}")
 
