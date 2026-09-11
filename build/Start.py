@@ -24,6 +24,12 @@ threads_count = 0
 # 監控會對這個 repo 做 pull / reset --hard,狀態檔放在被追蹤的路徑上會被洗掉,也會讓工作
 # 目錄變髒而擋住下一次 pull。
 RELEASE_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release-state")
+
+# 新版上傳通知的去重狀態檔的家。**不可以**跟 RELEASE_STATE_DIR 共用——那份狀態只在
+# release.enabled 的產品身上存在,通知現在對所有 enabled=true 的產品都要生效,兩者
+# 必須是獨立的持久化。理由同上:放 build/ 底下、已加進 .gitignore。
+NOTIFY_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify-state")
+
 PROJECT_ROOT = str(Path(__file__).parent.parent)
 
 # ---------------------------------------------------------------------------
@@ -1102,35 +1108,41 @@ def process(data):
     def notify_first_upload_of_new_version():
         """新版本的第一個安裝包成功上傳遠端後，發一次 Telegram 通知。
 
-        「版本」只在 release.enabled 開啟時才有意義（release_cycle 非 None，版本號綁
-        Setup/<product>/Src 的 commit）；沒開的產品這裡直接 return，不發送任何東西——
-        跟 release_flow 本身「沒開關的產品行為不變」的原則一致。
+        跟 release.enabled 完全無關——任何掃描通過（enabled=true）的產品都適用，呼叫端
+        只在 last_sync_ok（這一輪所有 remote target 都上傳成功）時才呼叫這個函式。
 
-        去重：沿用 release_flow 既有的狀態檔（build/release-state/<folder>.json），在
-        release_cycle.state 裡加一個 uploadNotifiedVersion 欄位，跟 reserve/publish 共用
-        同一份持久化機制，重啟後不會對同一版本重發。新版本 reserve 時 release_cycle.state
-        會被整個換掉（release_flow.ensure_reserved 的既有行為），這個欄位自然一併重置。
+        「新版本」信號：Setup/<folder>/Src 這個路徑最後一次被動到的 commit sha
+        （release_flow.source_commit）。這條 sync 打包機不做加密、不寫版本號，新的加密
+        樹一律是「別的流程 respack 打好後 commit 進來」才會出現在這裡（見 git log），
+        sha 換了就代表樹換了；sync 每輪重新 VMProtect 造成的工作目錄髒污不會動到已經
+        commit 的 sha，不會誤觸也不會漏觸。取不到 sha（不是 git repo/路徑沒被追蹤）就
+        直接放棄這一輪的通知，不猜。
+
+        去重：獨立狀態檔 build/notify-state/<folder>.json（不可借用 release-state，那份
+        只在 release.enabled 的產品身上存在），存 lastNotifiedVersionSignal，重啟後讀
+        得回來，不會對同一個 commit 重發。
         """
-        if release_cycle is None or not telegram_notifier_url:
+        if not telegram_notifier_url:
             return
-        version = release_cycle.version
-        if version is None:
+        commit = release_flow.source_commit(PROJECT_ROOT, name)
+        if not commit:
             return
-        if release_cycle.state.get("uploadNotifiedVersion") == version:
+        state_file = release_flow.state_path(NOTIFY_STATE_DIR, name)
+        state = release_flow.load_state(state_file)
+        if state.get("lastNotifiedVersionSignal") == commit:
             return
         target_names = ", ".join(
             rt.get("name", "<inline>") for rt in remote_targets
         ) or "<inline>"
         message = (
             f"product={name}\n"
-            f"release_target={release_cycle.target}\n"
-            f"version={version}\n"
+            f"version_signal={commit[:12]}\n"
             f"remote_targets={target_names}\n"
             f"time={time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
         notify_telegram(telegram_notifier_url, name, message)
-        release_cycle.state["uploadNotifiedVersion"] = version
-        release_flow.save_state(release_cycle.state_file, release_cycle.state)
+        state["lastNotifiedVersionSignal"] = commit
+        release_flow.save_state(state_file, state)
 
     def gen_file(target_index):
         print(f"[GenFile] generate {package_format} for index={target_index}")

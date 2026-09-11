@@ -7,5 +7,6 @@ Setup/*/Src/%19WJ/%1F%5DV%27/
 Setup/*/Src/%19WJ/%0E%5C%5E%22%06S/
 
 build/release-state/
+build/notify-state/
 build/tests/__pycache__
 .pytest_cache/
