@@ -732,6 +732,11 @@ def process(data):
         with zipfile.ZipFile(target_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(path):
                 for file in files:
+                    # VMProtect 專案檔(如 aig5 的 aig.dll.vmp)是 vmp_file() 加殼時要讀的
+                    # 輸入,只該留在 Src/gen 供加殼用,不該進出貨包(否則裝完會殘留在使用者
+                    # 機器上,還洩漏用了 VMProtect)。加殼在此之前已跑完,這裡排除掉即可。
+                    if file.lower().endswith(".vmp"):
+                        continue
                     abs_file = os.path.join(root, file)
                     # 計算相對於 path 的路徑
                     rel_path = os.path.relpath(abs_file, path)
