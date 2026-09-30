@@ -1,0 +1,13 @@
+{
+    "enabled": true,
+    "vmpFiles": [
+        "*.exe",
+        "apg.dll"
+    ],
+    "remoteTargets": {
+        "default": "/srv/axg/apg5/output",
+        "s3-space": "/corefiles/apg5"
+    },
+    "getNeedURL": "https://server.axggame.com/download/apg5/output/index",
+    "fileAmount": 20
+}
