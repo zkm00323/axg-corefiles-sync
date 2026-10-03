@@ -67,6 +67,23 @@ def notify_telegram(notifier_url, project, message):
     except Exception as e:
         print(f"⚠️[Notify] telegram notify failed: {e}")
 
+# 下載網址的網域。CDN 路徑 = 此網域 + s3 remote target 的 remotePath + 檔名
+# （rclone 就是把檔案丟到 bucket 的 remotePath 底下，CDN 對外映射同一路徑）。
+# 可用環境變數 AXG_DOWNLOAD_BASE_URL 覆蓋。
+DEFAULT_DOWNLOAD_BASE_URL = "https://download.axggame.com"
+
+def build_download_url(remote_targets, filename, base_url=None):
+    """用 s3 remote target 的 remotePath 組出 CDN 下載網址；沒有 s3 target 就回 None（不猜）。"""
+    base = (base_url or os.environ.get("AXG_DOWNLOAD_BASE_URL") or DEFAULT_DOWNLOAD_BASE_URL).strip().rstrip("/")
+    for target in remote_targets or []:
+        if str(target.get("type", "rsync")).lower() != "s3":
+            continue
+        remote_path = str(target.get("remotePath", "")).strip().strip("/").replace("\\", "/")
+        if not remote_path:
+            continue
+        return f"{base}/{remote_path}/{filename}"
+    return None
+
 def execute_with_timeout(cmd, timeout_seconds=300, max_retries=3, retry_delay=5):
     """執行命令並處理超時和重試"""
     def get_cmd_display_name(command):
@@ -1110,11 +1127,15 @@ def process(data):
             f"base={base_url} writer={release_config['versionWriter']['mode']}"
         )
 
-    def notify_first_upload_of_new_version():
-        """新版本的第一個安裝包成功上傳遠端後，發一次 Telegram 通知。
+    def notify_first_upload_of_new_version(uploaded_index=None):
+        """新版本的第一個安裝包成功上傳遠端後，發一次 Telegram 通知（含下載網址與版本）。
 
-        跟 release.enabled 完全無關——任何掃描通過（enabled=true）的產品都適用，呼叫端
-        只在 last_sync_ok（這一輪所有 remote target 都上傳成功）時才呼叫這個函式。
+        跟 release.enabled 完全無關——任何掃描通過（enabled=true）的產品都適用。呼叫端
+        有兩處，都只在 sync_all_remote_targets() 全部成功時才呼叫：
+          1. for 迴圈內每包上傳成功後（uploaded_index=剛傳完的序號）：新版第一包傳完
+             就發，不用等整批 20 包。
+          2. 主迴圈尾端補發（uploaded_index=None）：例如本輪沒產新檔、只補傳成功。
+             此時用目前已存在、序號最小的那一包產生網址。
 
         「新版本」信號：Setup/<folder>/Src 這個路徑最後一次被動到的 commit sha
         （release_flow.source_commit）。這條 sync 打包機不做加密、不寫版本號，新的加密
@@ -1125,7 +1146,7 @@ def process(data):
 
         去重：獨立狀態檔 build/notify-state/<folder>.json（不可借用 release-state，那份
         只在 release.enabled 的產品身上存在），存 lastNotifiedVersionSignal，重啟後讀
-        得回來，不會對同一個 commit 重發。
+        得回來，同一個 commit 只通知一次（發完才寫狀態，所以內外兩處呼叫不會重複發）。
         """
         if not telegram_notifier_url:
             return
@@ -1136,16 +1157,25 @@ def process(data):
         state = release_flow.load_state(state_file)
         if state.get("lastNotifiedVersionSignal") == commit:
             return
-        target_names = ", ".join(
-            rt.get("name", "<inline>") for rt in remote_targets
-        ) or "<inline>"
-        message = (
-            f"product={name}\n"
-            f"version_signal={commit[:12]}\n"
-            f"remote_targets={target_names}\n"
-            f"time={time.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        notify_telegram(telegram_notifier_url, name, message)
+        index = uploaded_index
+        if index is None:
+            existing = list_existing_index_files()
+            index = min(existing) if existing else None
+        version_text = commit[:12]
+        if release_cycle is not None and release_cycle.version is not None:
+            version_text += f"（release 版號 {release_cycle.version}）"
+        lines = [
+            "新版第一包已上線",
+            f"產品：{name}",
+            f"版本：{version_text}",
+        ]
+        if index is not None:
+            lines.append(f"序號：{index}")
+            url = build_download_url(remote_targets, f"{code}_{index}{output_ext}")
+            if url:
+                lines.append(f"下載：{url}")
+        lines.append(f"時間：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+        notify_telegram(telegram_notifier_url, name, "\n".join(lines))
         state["lastNotifiedVersionSignal"] = commit
         release_flow.save_state(state_file, state)
 
@@ -1214,6 +1244,12 @@ def process(data):
                     if not process_stop:
                         last_sync_ok = sync_all_remote_targets()
                         has_synced_once = True
+                        if last_sync_ok:
+                            # 新版第一包傳完就通知，不等整批 20 包；通知失敗不影響打包。
+                            try:
+                                notify_first_upload_of_new_version(missing_index)
+                            except Exception as e:
+                                print(f"⚠️[Notify] notify check failed: {e}")
 
                 # If only stale files were removed, or first run has not synced yet, sync once.
                 should_sync = ((stale_changed and not generated_any) or not has_synced_once) and not process_stop

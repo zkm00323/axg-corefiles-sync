@@ -135,8 +135,13 @@ def test_new_signal_sends_one_notification(tmp_path, harness):
     assert len(harness["notify_calls"]) == 1
     call = harness["notify_calls"][0]
     assert call["project"] == "aig4"
-    assert "version_signal=" + ("a" * 12) in call["message"]
-    assert "remote_targets=default" in call["message"]
+    assert "新版第一包已上線" in call["message"]
+    assert "產品：aig4" in call["message"]
+    assert "版本：" + ("a" * 12) in call["message"]
+    # 在 for 迴圈內、第一包（序號 START_INDEX）傳完就發。
+    assert f"序號：{START_INDEX}" in call["message"]
+    # 測試用 target 是 rsync、沒有 s3 target,不猜網址 → 不帶「下載：」行。
+    assert "下載：" not in call["message"]
 
     state_file = release_flow.state_path(str(tmp_path / "notify-state"), "aig4")
     assert os.path.isfile(state_file)
@@ -168,7 +173,7 @@ def test_signal_change_notifies_again(tmp_path, harness):
     run_one_pass(info)
 
     assert len(harness["notify_calls"]) == 2
-    assert "version_signal=" + ("b" * 12) in harness["notify_calls"][1]["message"]
+    assert "版本：" + ("b" * 12) in harness["notify_calls"][1]["message"]
 
 
 def test_upload_failure_does_not_notify(tmp_path, harness):
@@ -203,3 +208,30 @@ def test_notification_is_independent_of_release_enabled(tmp_path, harness, monke
 
     assert calls == []  # release API 完全沒被碰
     assert len(harness["notify_calls"]) == 1  # 但通知照樣發生
+
+
+def test_notification_fires_right_after_first_package_upload(tmp_path, harness, monkeypatch):
+    """通知在第一包 sync 成功後立刻發,不是等整批產完(FILE_AMOUNT=2 時第二包還沒產)。"""
+    seen = []
+    monkeypatch.setattr(
+        Start, "notify_telegram",
+        lambda *_a, **_k: seen.append(harness["sync_calls"]),
+    )
+    run_one_pass(build_product(tmp_path))
+
+    # 通知時只做過 1 次 sync(第一包),第二包還沒產/傳。
+    assert seen == [1]
+
+
+def test_build_download_url():
+    s3 = {"name": "s3-space", "type": "s3", "remotePath": "/corefiles/aig5"}
+    rsync = {"name": "default", "type": "rsync", "remotePath": "/srv/axg/aig5/output"}
+    assert (
+        Start.build_download_url([rsync, s3], "aig_12.zip")
+        == "https://download.axggame.com/corefiles/aig5/aig_12.zip"
+    )
+    assert Start.build_download_url([rsync], "aig_12.zip") is None
+    assert (
+        Start.build_download_url([s3], "a.zip", base_url="https://cdn.example/")
+        == "https://cdn.example/corefiles/aig5/a.zip"
+    )
