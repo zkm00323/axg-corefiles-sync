@@ -5,7 +5,6 @@
         "aug.dll"
     ],
     "remoteTargets": {
-        "default": "/srv/axg/aug/output",
         "s3-space": "/corefiles/aug1"
     },
     "getNeedURL": "https://server.axggame.com/download/aug/output/index",

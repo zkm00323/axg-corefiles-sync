@@ -5,7 +5,6 @@
         "aig.dll"
     ],
     "remoteTargets": {
-        "default": "/home/ubuntu/Output/aig2/",
         "s3-space": "/corefiles/aig3"
     },
     "getNeedURL": "https://ashrta.osananajimi.moe/beta2/aig/needupload",
